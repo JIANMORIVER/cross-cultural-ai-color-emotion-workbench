@@ -7,11 +7,27 @@ test("defines the Chromalab research workspace and social metadata", async () =>
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(layout, /Chromalab — AI 情绪—颜色关联实验平台/);
-  assert.match(layout, /og\.png/);
+  assert.match(layout, /Chromalab — 情绪—颜色实验与数据分析平台/);
+  assert.match(layout, /og-analysis\.png/);
   assert.match(platform, /定义研究项目/);
   assert.match(platform, /英文情绪词/);
   assert.match(platform, /匿名颜色/);
+});
+
+test("provides local multi-file analysis, independent exports, and filtered dashboards", async () => {
+  const [platform, analysis, engine] = await Promise.all([
+    readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/engine.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(platform, /数据分析/);
+  assert.match(analysis, /multiple/);
+  assert.match(analysis, /合并全部文件/);
+  assert.match(analysis, /导出 CSV/);
+  assert.match(analysis, /数据大屏/);
+  assert.match(engine, /task1-cluster/);
+  assert.match(engine, /task2-pairwise/);
+  assert.match(engine, /Jensen_Shannon距离/);
 });
 
 test("removes starter preview markers and keeps API keys out of exports", async () => {
