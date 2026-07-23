@@ -60,6 +60,15 @@ export const GEW_EMOTIONS = [
 export const GEW_COLOURS = ["D38", "F17", "F4", "J0", "F0", "F29", "A0", "H35", "I6", "G3", "C9"] as const;
 
 export const VALENCE: Record<string, number> = Object.fromEntries(GEW_EMOTIONS.map((emotion, index) => [emotion, index < 10 ? 1 : -1]));
+const TASK1_EMOTION_ALIASES: Record<string, string> = {
+  "感兴趣": "Interest", "欢愉": "Amusement", "自豪": "Pride", "欢乐": "Joy", "愉快": "Pleasure",
+  "满足": "Contentment", "赞赏": "Admiration", "爱": "Love", "如释重负": "Relief", "同情": "Compassion",
+  "悲伤": "Sadness", "内疚": "Guilt", "后悔": "Regret", "羞愧": "Shame", "失望": "Disappointment",
+  "恐惧": "Fear", "厌恶": "Disgust", "轻视": "Contempt", "憎恨": "Hate", "忿怒": "Anger",
+};
+function normalizeTask1Emotion(value: string) {
+  return TASK1_EMOTION_ALIASES[value.trim()] || GEW_EMOTIONS.find(emotion => emotion.toLowerCase() === value.trim().toLowerCase()) || value.trim();
+}
 
 const ALIASES = {
   source: ["source", "group", "model", "model_alias", "platform", "_source_file", "平台", "模型", "来源", "组别"],
@@ -209,7 +218,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
       const hex = key("hex") ? hexToRgb(text(raw[key("hex")!])) : null;
       const h = num(raw[key("h") || ""]), s = num(raw[key("s") || ""]), l = num(raw[key("l") || ""]);
       const rgb = hex || ([h, s, l].every(Number.isFinite) ? hslToRgb(Math.abs(h) <= 1 ? h * 360 : h, scaled(s), scaled(l)) : null);
-      if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), emotion, rgb)); else rejected += 1;
+      if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), normalizeTask1Emotion(emotion), rgb)); else rejected += 1;
     }));
     return { rows: result, rejected };
   }
@@ -230,7 +239,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
     if (!rgb && hsvValues.every(Number.isFinite)) rgb = hsvToRgb(Math.abs(hsvValues[0]) <= 1 ? hsvValues[0] * 360 : hsvValues[0], scaled(hsvValues[1]), scaled(hsvValues[2]));
     const labValues = [num(raw[labLCol || ""]), num(raw[labACol || ""]), num(raw[labBCol || ""])];
     if (!rgb && labValues.every(Number.isFinite)) rgb = labToRgb(labValues[0], labValues[1], labValues[2]);
-    if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), text(emotionColumn ? raw[emotionColumn] : null, "未标注"), rgb)); else rejected += 1;
+    if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), normalizeTask1Emotion(text(emotionColumn ? raw[emotionColumn] : null, "未标注")), rgb)); else rejected += 1;
   });
   return { rows: result, rejected };
 }
@@ -269,12 +278,12 @@ export function runColorClustering(colors: CanonicalColorRow[]): AnalysisResult 
   const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
   keys.forEach(key => {
     const [source, emotion] = key.split("\u0000"); const group = colors.filter(row => row.source === source && row.emotion === emotion); const points = group.map(row => [row.labL, row.labA, row.labB]);
-    if (points.length < 3) { rows.push({ 来源: source, 情绪: emotion, 样本数: points.length, 最佳K: 1, 轮廓系数: 0, 簇: 1, 簇权重: 1, 中心HEX: group[0]?.hex || "" }); return; }
-    let bestK = 2, bestScore = -Infinity, best = kmeans(points, 2); const maxK = Math.min(6, points.length - 1);
+    if (points.length < 5) return;
+    let bestK = 2, bestScore = -Infinity, best = kmeans(points, 2); const maxK = Math.min(5, points.length - 1);
     for (let k = 2; k <= maxK; k += 1) { const candidate = kmeans(points, k); const score = silhouette(points, candidate.labels, k); if (score > bestScore) { bestK = k; bestScore = score; best = candidate; } }
     best.centers.forEach((center, cluster) => { const count = best.labels.filter(label => label === cluster).length; const rgb = labToRgb(center[0], center[1], center[2]); rows.push({ 来源: source, 情绪: emotion, 样本数: points.length, 最佳K: bestK, 轮廓系数: round(bestScore), 簇: cluster + 1, 簇权重: round(count / points.length), 中心HEX: rgbToHex(rgb.r, rgb.g, rgb.b), 中心L: round(center[0]), 中心a: round(center[1]), 中心b: round(center[2]) }); });
   });
-  return { id: "task1-cluster", title: "最佳 K 与 Lab 色彩聚类", kind: "colors", rows, summary: [{ label: "来源×情绪组合", value: String(keys.length) }, { label: "聚类中心", value: String(rows.length) }, { label: "K 搜索范围", value: "2–6" }], note: "在 CIE Lab 空间执行确定性 K-means，并用平均轮廓系数选择最佳 K。" };
+  return { id: "task1-cluster", title: "最佳 K 与 Lab 色彩聚类", kind: "colors", rows, summary: [{ label: "来源×情绪组合", value: String(keys.length) }, { label: "聚类中心", value: String(rows.length) }, { label: "K 搜索范围", value: "2–5" }], note: "沿用 Bias_kNumbers.py 的规则：样本数不足 5 的组合跳过；其余在 CIE Lab 空间搜索 K=2–5，并用平均轮廓系数选择最佳 K。" };
 }
 
 function symmetricMinDistance(a: CanonicalColorRow[], b: CanonicalColorRow[]) {
@@ -296,6 +305,43 @@ export function runDeltaE(colors: CanonicalColorRow[]): AnalysisResult {
 export function runColorSummary(colors: CanonicalColorRow[], rejected: number): AnalysisResult {
   const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))]; const rows = keys.map(key => { const [source, emotion] = key.split("\u0000"); const group = colors.filter(row => row.source === source && row.emotion === emotion); const lab = meanVector(group.map(row => [row.labL, row.labA, row.labB])); const rgb = labToRgb(lab[0], lab[1], lab[2]); return { 来源: source, 情绪: emotion, N: group.length, 平均HEX: rgbToHex(rgb.r, rgb.g, rgb.b), 平均H: round(group.reduce((sum, row) => sum + row.h, 0) / group.length, 2), 平均S: round(group.reduce((sum, row) => sum + row.s, 0) / group.length), 平均L: round(group.reduce((sum, row) => sum + row.l, 0) / group.length), 平均Lab_L: round(lab[0]), 平均Lab_a: round(lab[1]), 平均Lab_b: round(lab[2]) }; });
   return { id: "task1-summary", title: "来源 × 情绪色彩描述", kind: "colors", rows, summary: [{ label: "有效色彩", value: String(colors.length) }, { label: "组合", value: String(rows.length) }, { label: "拒绝值", value: String(rejected) }] };
+}
+
+export function runHsvDistribution(colors: CanonicalColorRow[]): AnalysisResult {
+  const rows: ExportRow[] = colors.map(row => ({ 来源: row.source, 情绪: row.emotion, HEX: row.hex, H_HSV_度: round(row.hsvH, 3), S_HSV: round(row.hsvS, 5), V_HSV: round(row.hsvV, 5) }));
+  return { id: "task1-hsv", title: "HSV 分布与 H–S / V–S 图", kind: "colors", rows, summary: [{ label: "有效观察", value: String(rows.length) }, { label: "来源", value: String(new Set(colors.map(row => row.source)).size) }, { label: "情绪", value: String(new Set(colors.map(row => row.emotion)).size) }], note: "严格沿用 hsvplot.py：由标准 RGB 转换到 HSV，H 为 0–360°，S 与 V 为 0–1。" };
+}
+
+export function runWithinGroupDelta(colors: CanonicalColorRow[]): AnalysisResult {
+  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
+  const rows: ExportRow[] = [];
+  keys.forEach(key => {
+    const [source, emotion] = key.split("\u0000"); const group = colors.filter(row => row.source === source && row.emotion === emotion);
+    if (group.length < 2) return;
+    let total = 0, pairs = 0; const nearest = new Array(group.length).fill(Infinity);
+    for (let i = 0; i < group.length; i += 1) for (let j = i + 1; j < group.length; j += 1) { const value = distance(group[i], group[j]); total += value; pairs += 1; nearest[i] = Math.min(nearest[i], value); nearest[j] = Math.min(nearest[j], value); }
+    rows.push({ 来源: source, 情绪: emotion, 样本数: group.length, 平均最近邻ΔE76: round(nearest.reduce((sum, value) => sum + value, 0) / group.length, 4), 全部样本对平均ΔE76: round(total / Math.max(1, pairs), 4), 样本对数量: pairs });
+  });
+  return { id: "task1-within-delta", title: "组内色差矩阵与一致性", kind: "statistics", rows, summary: [{ label: "来源×情绪", value: String(rows.length) }, { label: "来源", value: String(new Set(colors.map(row => row.source)).size) }, { label: "有效色彩", value: String(colors.length) }], note: "对应 demac.py 与 de2mac.py：对角线排除，汇总平均最近邻色差和全部样本对平均色差。" };
+}
+
+export function runCulturalBias(colors: CanonicalColorRow[]): AnalysisResult {
+  const sources = [...new Set(colors.map(row => row.source))], emotions = [...new Set(colors.map(row => row.emotion))]; const rows: ExportRow[] = [];
+  emotions.forEach(emotion => sources.forEach((target, targetIndex) => {
+    const references = sources.filter((_, index) => index !== targetIndex);
+    for (let i = 0; i < references.length; i += 1) for (let j = 0; j < references.length; j += 1) {
+      if (i === j) continue;
+      const referenceA = references[i], referenceB = references[j];
+      const targetRows = colors.filter(row => row.source === target && row.emotion === emotion);
+      const aRows = colors.filter(row => row.source === referenceA && row.emotion === emotion);
+      const bRows = colors.filter(row => row.source === referenceB && row.emotion === emotion);
+      const distanceA = symmetricMinDistance(aRows, targetRows), distanceB = symmetricMinDistance(bRows, targetRows);
+      if (!Number.isFinite(distanceA) || !Number.isFinite(distanceB)) continue;
+      const bias = distanceB - distanceA;
+      rows.push({ 情绪: emotion, 参照A: referenceA, 参照B: referenceB, 目标来源: target, 目标至A_ΔE: round(distanceA, 4), 目标至B_ΔE: round(distanceB, 4), 偏置指数_B减A: round(bias, 4), 更接近: Math.abs(bias) < .001 ? "中立" : bias > 0 ? referenceA : referenceB });
+    }
+  }));
+  return { id: "task1-bias", title: "跨文化引力与偏置指数", kind: "statistics", rows, summary: [{ label: "偏置观察", value: String(rows.length) }, { label: "来源", value: String(sources.length) }, { label: "情绪", value: String(emotions.length) }], note: "泛化 de6mac.py / de7mac.py：Bias = 目标至参照B ΔE − 目标至参照A ΔE；正值表示更接近参照A。" };
 }
 
 function normalizeEmotion(value: string) { const exact = GEW_EMOTIONS.find(emotion => emotion.toLowerCase() === value.trim().toLowerCase()); return exact || value.trim(); }

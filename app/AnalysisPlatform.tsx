@@ -1,19 +1,23 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { Task1VisualLab } from "./analysis/Task1VisualLab";
 import {
   colorRowsToExport,
   detectDataset,
   parseColorRows,
   parseGewRows,
   runColorClustering,
+  runCulturalBias,
   runColorSummary,
   runDeltaE,
+  runHsvDistribution,
   runGewDescriptive,
   runGewJsd,
   runGewOmnibus,
   runGewPairwise,
   runGewQc,
+  runWithinGroupDelta,
   toCsv,
   type AnalysisResult,
   type DataRow,
@@ -28,8 +32,11 @@ type WorkspaceTab = "import" | "tasks" | "dashboard";
 const TASKS = [
   { id: "task1-normalize", group: "实验一", title: "色彩格式标准化", description: "宽表转长表，并将 HEX、RGB、HSL、HSV 或 Lab 统一到五种标准色彩表示。", output: "标准长表" },
   { id: "task1-summary", group: "实验一", title: "来源 × 情绪描述统计", description: "汇总每个来源与情绪的样本量、平均色彩、亮度与饱和度。", output: "描述统计" },
-  { id: "task1-cluster", group: "实验一", title: "最佳 K 与 Lab 聚类", description: "在 Lab 空间搜索 K=2–6，以轮廓系数选择最佳聚类并输出中心色与权重。", output: "聚类中心" },
+  { id: "task1-hsv", group: "实验一", title: "HSV 分布与 H–S / V–S 图", description: "由 RGB 转换 HSV，生成按来源分面的 H–S 极坐标和 V–S 密度散点数据。", output: "HSV 长表 + 图表" },
+  { id: "task1-cluster", group: "实验一", title: "最佳 K 与 Lab 聚类", description: "按历史脚本在 Lab 空间搜索 K=2–5，以轮廓系数选择最佳聚类并输出中心色与权重；少于 5 个样本的组合跳过。", output: "聚类中心" },
+  { id: "task1-within-delta", group: "实验一", title: "组内色差与选择一致性", description: "生成组内 ΔE 矩阵摘要，计算平均最近邻色差和全部样本对平均色差。", output: "组内一致性" },
   { id: "task1-delta", group: "实验一", title: "跨来源 ΔE 色差", description: "按情绪计算来源之间的双向最近邻 CIE76 色差，刻画模型或文化偏差。", output: "色差矩阵" },
+  { id: "task1-bias", group: "实验一", title: "跨文化引力与偏置指数", description: "以任意两个来源为参照，计算其他来源在每个情绪上的文化偏置方向与强度。", output: "偏置指数" },
   { id: "task2-qc", group: "实验二", title: "GEW 解析与质量控制", description: "解析 word_data.<颜色> JSON，检查无效单元格并补齐 20 情绪完整网格。", output: "QC 长表" },
   { id: "task2-descriptive", group: "实验二", title: "选择率、强度与价性", description: "按来源、颜色和情绪计算选择率、全部样本强度、已选强度与正负价性。", output: "描述统计" },
   { id: "task2-omnibus", group: "实验二", title: "来源间总体差异", description: "对每个颜色 × 情绪执行总体卡方检验，并进行 Benjamini–Hochberg FDR 校正。", output: "总体检验" },
@@ -88,7 +95,10 @@ export function AnalysisPlatform() {
     try {
       const XLSX = await import("xlsx"); const parsed: SheetData[] = [];
       for (const file of files) {
-        const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+        const buffer = await file.arrayBuffer();
+        const workbook = file.name.toLowerCase().endsWith(".csv")
+          ? XLSX.read(new TextDecoder("utf-8").decode(buffer), { type: "string", cellDates: true })
+          : XLSX.read(buffer, { type: "array", cellDates: true });
         workbook.SheetNames.forEach(name => {
           const rawRows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { defval: null, raw: true }) as DataRow[];
           const rows = rawRows.map(row => ({ _source_file: file.name.replace(/\.[^.]+$/, ""), ...row }));
@@ -121,8 +131,11 @@ export function AnalysisPlatform() {
       let result: AnalysisResult;
       if (id === "task1-normalize") result = resultFromRows(id, "色彩格式标准化", colorRowsToExport(colorData.rows), [{ label: "有效色彩", value: String(colorData.rows.length) }, { label: "拒绝值", value: String(colorData.rejected) }, { label: "识别格式", value: detection.formats.join(" + ") || "—" }], "所有可解析色彩均统一输出为 HEX、RGB、HSL、HSV 与 CIE Lab。");
       else if (id === "task1-summary") result = runColorSummary(colorData.rows, colorData.rejected);
+      else if (id === "task1-hsv") result = runHsvDistribution(colorData.rows);
       else if (id === "task1-cluster") result = runColorClustering(colorData.rows);
+      else if (id === "task1-within-delta") result = runWithinGroupDelta(colorData.rows);
       else if (id === "task1-delta") result = runDeltaE(colorData.rows);
+      else if (id === "task1-bias") result = runCulturalBias(colorData.rows);
       else if (id === "task2-qc") result = runGewQc(gewData);
       else if (id === "task2-descriptive") result = runGewDescriptive(gewData.rows);
       else if (id === "task2-omnibus") result = runGewOmnibus(gewData.rows);
@@ -137,6 +150,7 @@ export function AnalysisPlatform() {
     const task1 = (detection.schema === "task1-wide" || detection.schema === "task1-long" || detection.schema === "mixed") && colorData.rows.length > 0;
     const task2 = (detection.schema === "task2-gew" || detection.schema === "mixed") && gewData.rows.length > 0;
     if (id === "task1-delta") return task1 && new Set(colorData.rows.map(row => row.source)).size >= 2;
+    if (id === "task1-bias") return task1 && new Set(colorData.rows.map(row => row.source)).size >= 3;
     if (["task2-omnibus", "task2-pairwise", "task2-jsd"].includes(id)) return task2 && new Set(gewData.rows.map(row => row.source)).size >= 2;
     return id.startsWith("task1") ? task1 : task2;
   }
@@ -218,7 +232,7 @@ export function AnalysisPlatform() {
         {dashboardMode === "task2" ? <><label>颜色<select value={colors.includes(colorFilter) ? colorFilter : "全部颜色"} onChange={event => setColorFilter(event.target.value)}><option>全部颜色</option>{colors.map(value => <option key={value}>{value}</option>)}</select></label><label>指标<select value={metric} onChange={event => setMetric(event.target.value as typeof metric)}><option>选择率</option><option>平均强度_全部</option></select></label></> : null}
       </div>
 
-      {dashboardMode === "task1" ? <Task1Dashboard rows={dashboardColors} /> : <Task2Dashboard rows={dashboardGew} metric={metric} />}
+      {dashboardMode === "task1" ? <Task1Dashboard rows={dashboardColors} fileName={fileName} /> : <Task2Dashboard rows={dashboardGew} metric={metric} />}
     </section> : null}
   </>;
 }
@@ -228,15 +242,11 @@ function ResultPreview({ result }: { result: AnalysisResult }) {
   return <details className="task-preview"><summary>预览结果 · {result.rows.length} 行</summary><div><table><thead><tr>{columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.rows.slice(0, 3).map((row, index) => <tr key={index}>{columns.map(column => <td key={column}>{column.toLowerCase().includes("hex") ? <><i className="tiny-swatch" style={{ background: String(row[column]) }} />{String(row[column])}</> : String(row[column] ?? "")}</td>)}</tr>)}</tbody></table>{result.note ? <p>{result.note}</p> : null}</div></details>;
 }
 
-function Task1Dashboard({ rows }: { rows: ReturnType<typeof parseColorRows>["rows"] }) {
+function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColorRows>["rows"]; fileName: string }) {
   const average = (key: "s" | "l" | "labL") => rows.length ? rows.reduce((sum, row) => sum + row[key], 0) / rows.length : 0;
-  const swatches = [...new Map(rows.map(row => [row.hex, row])).values()].slice(0, 80);
   return <>
     <div className="dashboard-kpis"><article><span>有效色彩</span><strong>{rows.length.toLocaleString()}</strong><small>当前筛选范围</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row.source)).size}</strong><small>模型 / 文化组</small></article><article><span>平均饱和度</span><strong>{(average("s") * 100).toFixed(1)}%</strong><small>HSL S</small></article><article><span>平均明度</span><strong>{average("labL").toFixed(1)}</strong><small>CIE Lab L*</small></article></div>
-    <div className="dashboard-grid">
-      <section className="dashboard-panel panel"><div className="panel-head"><div><h3>色相–饱和度分布</h3><p>每个点代表一个有效词选色观察，点色为其真实 HEX。</p></div><span className="analysis-count">H 0–360° · S 0–100%</span></div>{rows.length ? <svg className="hs-scatter" viewBox="0 0 760 360" role="img" aria-label="色相饱和度散点图"><line x1="48" x2="730" y1="320" y2="320" /><line x1="48" x2="48" y1="25" y2="320" />{[0, 90, 180, 270, 360].map(value => <g key={value}><line className="grid" x1={48 + value / 360 * 682} x2={48 + value / 360 * 682} y1="25" y2="320" /><text x={48 + value / 360 * 682} y="342">{value}°</text></g>)}{[0, .25, .5, .75, 1].map(value => <g key={value}><line className="grid" x1="48" x2="730" y1={320 - value * 295} y2={320 - value * 295} /><text x="12" y={324 - value * 295}>{value * 100}%</text></g>)}{rows.slice(0, 1200).map((row, index) => <circle key={index} cx={48 + row.h / 360 * 682} cy={320 - row.s * 295} r="4.5" fill={row.hex} />)}</svg> : <DashboardEmpty />}</section>
-      <section className="dashboard-panel panel"><div className="panel-head"><div><h3>当前色彩样本</h3><p>去重后的色块矩阵，悬停查看来源与情绪。</p></div><span className="analysis-count">{swatches.length} 色</span></div>{swatches.length ? <div className="swatch-mosaic">{swatches.map((row, index) => <div key={`${row.hex}-${index}`} style={{ background: row.hex }} title={`${row.source} · ${row.emotion} · ${row.hex}`}><span>{row.hex}</span></div>)}</div> : <DashboardEmpty />}</section>
-    </div>
+    <Task1VisualLab rows={rows} fileName={fileName} />
   </>;
 }
 

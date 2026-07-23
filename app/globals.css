@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./analysis/visuals.css";
 
 :root {
   --ink: #17212b;

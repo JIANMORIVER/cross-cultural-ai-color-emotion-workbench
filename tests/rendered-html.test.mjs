@@ -15,10 +15,11 @@ test("defines the Chromalab research workspace and social metadata", async () =>
 });
 
 test("provides local multi-file analysis, independent exports, and filtered dashboards", async () => {
-  const [platform, analysis, engine] = await Promise.all([
+  const [platform, analysis, engine, task1Visuals] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/analysis/engine.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/Task1VisualLab.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(platform, /数据分析/);
   assert.match(analysis, /multiple/);
@@ -28,6 +29,17 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(engine, /task1-cluster/);
   assert.match(engine, /task2-pairwise/);
   assert.match(engine, /Jensen_Shannon距离/);
+  assert.match(engine, /task1-hsv/);
+  assert.match(engine, /task1-within-delta/);
+  assert.match(engine, /task1-bias/);
+  assert.match(task1Visuals, /H–S 极坐标分面/);
+  assert.match(task1Visuals, /V–S 密度散点分面/);
+  assert.match(task1Visuals, /K-means 权重色带/);
+  assert.match(task1Visuals, /来源对平均 ΔE 与基线/);
+  assert.match(task1Visuals, /情绪–来源难度聚类热图/);
+  assert.match(task1Visuals, /文化引力场散点图/);
+  assert.match(task1Visuals, /文化距离斜率图/);
+  assert.match(task1Visuals, /导出图表 PNG/);
 });
 
 test("removes starter preview markers and keeps API keys out of exports", async () => {
