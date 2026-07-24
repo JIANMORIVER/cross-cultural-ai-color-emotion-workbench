@@ -29,6 +29,13 @@
       "when": 1784196582952,
       "tag": "0003_material_mantis",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1784867855920,
+      "tag": "0004_upgrade_gpt56",
+      "breakpoints": true
     }
   ]
 }

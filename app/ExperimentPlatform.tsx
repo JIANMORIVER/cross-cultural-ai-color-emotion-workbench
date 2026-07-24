@@ -122,7 +122,7 @@ const defaultSettings: Settings = {
 };
 
 const defaultModels: Model[] = [
-  { id: "model-gpt", provider: "OpenAI", alias: "GPT", model_id: "gpt-4.1-mini", base_url: "https://api.openai.com/v1", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: true, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-gpt", provider: "OpenAI", alias: "GPT", model_id: "gpt-5.6", base_url: "https://api.openai.com/v1", api_format: "OpenAI Chat Completions", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
   { id: "model-deepseek", provider: "DeepSeek", alias: "DeepSeek", model_id: "deepseek-chat", base_url: "https://api.deepseek.com/v1", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
   { id: "model-doubao", provider: "ByteDance", alias: "Doubao", model_id: "doubao-seed-1-6", base_url: "https://ark.cn-beijing.volces.com/api/v3", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
   { id: "model-gemini", provider: "Google", alias: "Gemini", model_id: "gemini-2.5-flash", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
@@ -130,7 +130,9 @@ const defaultModels: Model[] = [
 
 const MODEL_VARIANTS = {
   openai: [
-    ["GPT 4.1 Mini", "gpt-4.1-mini"], ["GPT 4.1", "gpt-4.1"], ["GPT 4o Mini", "gpt-4o-mini"],
+    ["GPT 5.6（旗舰别名）", "gpt-5.6"], ["GPT 5.6 Sol", "gpt-5.6-sol"],
+    ["GPT 5.6 Terra", "gpt-5.6-terra"], ["GPT 5.6 Luna", "gpt-5.6-luna"],
+    ["GPT 4.1 Mini（旧版对照）", "gpt-4.1-mini"],
   ],
   google: [
     ["Gemini 3.5 Flash", "gemini-3.5-flash"], ["Flash 最新版", "gemini-flash-latest"],
@@ -685,9 +687,9 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
           <label>模型别名<input value={selected.alias} onChange={e => patch({ alias: e.target.value })} /></label>
           <div className="model-version-picker span-2">
             <div className="version-picker-head"><div><span className="eyebrow">具体模型型号</span><b>选择 Flash、Pro 或其他版本</b></div><Pill tone="blue">当前：{selected.model_id}</Pill></div>
-            <div className="variant-chips">{variants.map(([label, id]) => <button type="button" key={id} className={selected.model_id === id ? "active" : ""} onClick={() => patch({ model_id: id })}><b>{label}</b><small>{id}</small></button>)}</div>
+            <div className="variant-chips">{variants.map(([label, id]) => <button type="button" key={id} className={selected.model_id === id ? "active" : ""} onClick={() => patch({ model_id: id, api_format: id.startsWith("gpt-5.6") ? "OpenAI Chat Completions" : selected.api_format, supports_seed: id.startsWith("gpt-5.6") ? false : selected.supports_seed, last_test_status: "Not tested", latency_ms: null })}><b>{label}</b><small>{id}</small></button>)}</div>
             <label>自定义 Model ID<input className="mono" value={selected.model_id} onChange={e => patch({ model_id: e.target.value })} /></label>
-            <small className="version-note">列表是快捷选择；也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。</small>
+            <small className="version-note">GPT‑5.6 是当前系列；gpt-5.6 默认指向旗舰 Sol。列表是快捷选择，也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。</small>
           </div>
           <label className="span-2">接口地址 Base URL<input className="mono" value={selected.base_url} onChange={e => patch({ base_url: e.target.value })} /></label>
           <label className="span-2">临时 API Key<div className="secret-field"><input type="password" value={apiKey} placeholder="sk-••••••••••••••••" autoComplete="off" onChange={e => setKey(e.target.value)} /><span>仅本次会话</span></div><small className="field-note">传输过程加密，绝不写入项目数据库或导出文件。</small></label>

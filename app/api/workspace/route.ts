@@ -74,7 +74,7 @@ async function ensureSchema() {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(PROJECT_ID, 100, 1, 1, 2, 3, 60, 1, 0, 20260715, 0, 0, "all", "model-gpt", 1, 1, 1),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-4.1-mini", "https://api.openai.com/v1", "OpenAI-compatible", 500, 0.8, 1, 1, 1, 60, 1, "Not tested", null),
+        .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-5.6", "https://api.openai.com/v1", "OpenAI Chat Completions", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind("model-deepseek", PROJECT_ID, "DeepSeek", "DeepSeek", "deepseek-chat", "https://api.deepseek.com/v1", "OpenAI-compatible", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

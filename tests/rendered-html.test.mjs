@@ -93,23 +93,35 @@ test("provides controllable randomness policies and both reference workbook expo
   assert.match(migration, /prompt_variants_enabled/);
 });
 
-test("supports one-model pilots, visible model variants, and a real saved pilot request", async () => {
-  const [platform, pilotRoute, migration] = await Promise.all([
+test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilot request", async () => {
+  const [platform, pilotRoute, runRoute, modelTestRoute, migration, modelMigration] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/pilot-test/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/run-trial/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/model-test/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_soft_wiccan.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0004_upgrade_gpt56.sql", import.meta.url), "utf8"),
   ]);
   assert.match(platform, /具体模型型号/);
+  assert.match(platform, /GPT 5\.6（旗舰别名）/);
+  assert.match(platform, /gpt-5\.6-sol/);
+  assert.match(platform, /gpt-5\.6-terra/);
+  assert.match(platform, /gpt-5\.6-luna/);
   assert.match(platform, /Gemini 3\.5 Flash/);
   assert.match(platform, /DeepSeek V4 Pro/);
   assert.match(platform, /试跑实验一/);
   assert.match(platform, /试跑实验二/);
   assert.match(platform, /单模型模式不会检查、调用或要求其他模型/);
   assert.match(pilotRoute, /INSERT INTO trial_results/);
+  assert.match(pilotRoute, /max_completion_tokens/);
+  assert.match(pilotRoute, /reasoning_effort = "none"/);
+  assert.match(runRoute, /max_completion_tokens/);
+  assert.match(modelTestRoute, /max_completion_tokens/);
   assert.match(pilotRoute, /Interest/);
   assert.doesNotMatch(pilotRoute, /INSERT[^;]*apiKey/s);
   assert.match(migration, /model_scope/);
   assert.match(migration, /single_model_id/);
+  assert.match(modelMigration, /gpt-5\.6/);
 });
 
 test("uses partial 1–5 emotion ratings and reproducible shuffled presentation orders", async () => {

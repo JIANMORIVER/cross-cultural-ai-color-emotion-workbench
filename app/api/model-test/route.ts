@@ -8,21 +8,31 @@ function safeEndpoint(baseUrl: string) {
   return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 }
 
+function isGpt56(modelId: string) {
+  return /^gpt-5\.6(?:-|$)/i.test(modelId);
+}
+
 export async function POST(request: Request) {
   const started = Date.now();
   try {
     const { apiKey, baseUrl, modelId } = await request.json() as Record<string, string>;
     if (!apiKey || !baseUrl || !modelId) return Response.json({ ok: false, message: "Complete the API key, Base URL, and Model ID." }, { status: 400 });
+    const requestBody: Record<string, unknown> = {
+      model: modelId,
+      messages: [{ role: "user", content: "Return only this JSON object: {\"ok\":true}" }],
+      response_format: { type: "json_object" },
+    };
+    if (isGpt56(modelId)) {
+      requestBody.max_completion_tokens = 64;
+      requestBody.reasoning_effort = "none";
+    } else {
+      requestBody.max_tokens = 20;
+      requestBody.temperature = 0;
+    }
     const response = await fetch(safeEndpoint(baseUrl), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: "user", content: "Return only this JSON object: {\"ok\":true}" }],
-        max_tokens: 20,
-        temperature: 0,
-        response_format: { type: "json_object" },
-      }),
+      body: JSON.stringify(requestBody),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {

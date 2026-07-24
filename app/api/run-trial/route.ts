@@ -28,6 +28,10 @@ function enabled(value: number | boolean) {
   return value === true || value === 1;
 }
 
+function isGpt56(modelId: string) {
+  return /^gpt-5\.6(?:-|$)/i.test(modelId);
+}
+
 function safeEndpoint(baseUrl: string) {
   const url = new URL(baseUrl);
   if (url.protocol !== "https:") throw new Error("只允许使用 HTTPS 模型接口。");
@@ -92,13 +96,19 @@ export async function POST(request: Request) {
       ? buildWordToColorPrompt(trial.stimulusId)
       : buildColorToEmotionPrompt(trial.stimulusId, trial.stimulusHex || "", body.settings, trial.runIndex, trial.stimulusIndex).prompt;
     const policy = applyRandomnessPolicy(prompt, body.settings, trial.runIndex, trial.stimulusIndex, body.model.supports_seed);
+    const tokenLimit = Math.max(64, Math.min(32768, Number(body.model.max_tokens) || 500));
     const requestBody: Record<string, unknown> = {
       model: body.model.model_id,
       messages: [{ role: "user", content: policy.prompt }],
-      max_tokens: Math.max(64, Math.min(32768, Number(body.model.max_tokens) || 500)),
       temperature: Number(body.model.temperature),
       top_p: Number(body.model.top_p),
     };
+    if (isGpt56(body.model.model_id)) {
+      requestBody.max_completion_tokens = tokenLimit;
+      requestBody.reasoning_effort = "none";
+    } else {
+      requestBody.max_tokens = tokenLimit;
+    }
     if (enabled(body.model.supports_json)) requestBody.response_format = { type: "json_object" };
     if (policy.nativeSeed !== null) requestBody.seed = policy.nativeSeed;
 
