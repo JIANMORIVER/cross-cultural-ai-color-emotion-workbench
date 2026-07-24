@@ -94,11 +94,12 @@ test("provides controllable randomness policies and both reference workbook expo
 });
 
 test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilot request", async () => {
-  const [platform, pilotRoute, runRoute, modelTestRoute, migration, modelMigration] = await Promise.all([
+  const [platform, pilotRoute, runRoute, modelTestRoute, modelRequest, migration, modelMigration] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/pilot-test/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/run-trial/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/model-test/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/experiment/model-request.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_soft_wiccan.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0004_upgrade_gpt56.sql", import.meta.url), "utf8"),
   ]);
@@ -113,10 +114,12 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
   assert.match(platform, /试跑实验二/);
   assert.match(platform, /单模型模式不会检查、调用或要求其他模型/);
   assert.match(pilotRoute, /INSERT INTO trial_results/);
-  assert.match(pilotRoute, /max_completion_tokens/);
-  assert.match(pilotRoute, /reasoning_effort = "none"/);
-  assert.match(runRoute, /max_completion_tokens/);
-  assert.match(modelTestRoute, /max_completion_tokens/);
+  assert.match(pilotRoute, /buildChatRequest/);
+  assert.match(runRoute, /buildChatRequest/);
+  assert.match(modelTestRoute, /buildChatRequest/);
+  assert.match(modelRequest, /max_completion_tokens/);
+  assert.match(modelRequest, /reasoning_effort = "none"/);
+  assert.match(modelRequest, /type: "json_schema"/);
   assert.match(pilotRoute, /Interest/);
   assert.doesNotMatch(pilotRoute, /INSERT[^;]*apiKey/s);
   assert.match(migration, /model_scope/);
@@ -125,11 +128,11 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
 });
 
 test("uses partial 1–5 emotion ratings and reproducible shuffled presentation orders", async () => {
-  const [platform, prompts, randomness, pilotRoute, migration] = await Promise.all([
+  const [platform, prompts, randomness, responseParser, migration] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/experiment/prompts.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/experiment/randomness.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/pilot-test/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/experiment/response-parser.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0003_material_mantis.sql", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(platform, /0–100 关联强度/);
@@ -139,7 +142,7 @@ test("uses partial 1–5 emotion ratings and reproducible shuffled presentation 
   assert.match(prompts, /Choose any subset/);
   assert.match(prompts, /1 = very weak/);
   assert.match(randomness, /seededShuffle/);
-  assert.match(pilotRoute, /intensity < 1 \|\| intensity > 5/);
+  assert.match(responseParser, /numeric < 1 \|\| numeric > 5/);
   assert.match(migration, /shuffle_emotion_order/);
   assert.match(migration, /shuffle_color_order/);
   assert.match(migration, /shuffle_emotion_options/);
@@ -189,16 +192,35 @@ test("lets researchers select specific model-run groups for every result export"
   assert.match(workspaceRoute, /trial_id NOT LIKE 'pilot-%'/);
 });
 
-test("counts and exports a group only when all 20 word and 11 color trials exist", async () => {
+test("supports strict complete exports and rescue exports for incomplete runs", async () => {
   const [platform, sourceExport] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/export/source-export.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(platform, /每组含 20\/20 词选色 \+ 11\/11 色选词/);
-  assert.match(platform, /未完成轮次不会导出/);
+  assert.match(platform, /严格正式导出/);
+  assert.match(platform, /抢救导出/);
+  assert.match(platform, /invalid_records/);
   assert.match(platform, /isCompleteRunGroup/);
   assert.match(sourceExport, /group\.word\.size === 20 && group\.color\.size === 11/);
   assert.match(sourceExport, /completeFormalResults/);
+  assert.match(sourceExport, /payload\.export_scope === "available"/);
+});
+
+test("persists exact failed attempts and uses tolerant validated response parsing", async () => {
+  const [runRoute, workspaceRoute, parser, migration] = await Promise.all([
+    readFile(new URL("../app/api/run-trial/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/workspace/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/experiment/response-parser.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0005_orange_thor_girl.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(runRoute, /saveAttempt/);
+  assert.match(runRoute, /validation_error/);
+  assert.match(runRoute, /request_error/);
+  assert.match(workspaceRoute, /recentFailures/);
+  assert.match(parser, /extractBalancedJson/);
+  assert.match(parser, /normalizeHex/);
+  assert.match(parser, /normalizedIntensity/);
+  assert.match(migration, /CREATE TABLE `trial_attempts`/);
 });
 
 test("starts every new batch at the next unused run index and defaults exports to all groups", async () => {

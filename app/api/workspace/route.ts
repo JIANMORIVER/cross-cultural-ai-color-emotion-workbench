@@ -42,7 +42,16 @@ async function ensureSchema() {
       validation_status TEXT NOT NULL, retry_count INTEGER NOT NULL,
       latency_ms INTEGER NOT NULL, created_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS trial_attempts (
+      attempt_id TEXT PRIMARY KEY, logical_trial_id TEXT NOT NULL,
+      project_id TEXT NOT NULL, model_id TEXT NOT NULL, model_alias TEXT NOT NULL,
+      task_type TEXT NOT NULL, run_index INTEGER NOT NULL, stimulus_id TEXT NOT NULL,
+      attempt_no INTEGER NOT NULL, status TEXT NOT NULL, http_status INTEGER,
+      retryable INTEGER NOT NULL, error_message TEXT NOT NULL, raw_response TEXT NOT NULL,
+      latency_ms INTEGER NOT NULL, created_at TEXT NOT NULL
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS trial_project_idx ON trial_results(project_id, task_type)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS attempt_project_idx ON trial_attempts(project_id, model_id, run_index)"),
   ]);
 
   const settingsColumns = await db.prepare("PRAGMA table_info(experiment_settings)").all();
@@ -88,27 +97,61 @@ async function ensureSchema() {
 export async function GET() {
   await ensureSchema();
   const db = env.DB;
-  const [project, models, settings, results, counts, groupSummaries, nextRun] = await Promise.all([
+  const [project, models, settings, results, counts, groupSummaries, nextRun, recentFailures] = await Promise.all([
     db.prepare("SELECT * FROM projects WHERE id = ?").bind(PROJECT_ID).first(),
     db.prepare("SELECT * FROM model_configs WHERE project_id = ? ORDER BY rowid").bind(PROJECT_ID).all(),
     db.prepare("SELECT * FROM experiment_settings WHERE project_id = ?").bind(PROJECT_ID).first(),
     db.prepare("SELECT * FROM trial_results WHERE project_id = ? ORDER BY created_at DESC LIMIT 80").bind(PROJECT_ID).all(),
     db.prepare(`SELECT task_type, validation_status, COUNT(*) AS count
       FROM trial_results WHERE project_id = ? GROUP BY task_type, validation_status`).bind(PROJECT_ID).all(),
-    db.prepare(`SELECT model_id, model_alias, run_index,
-      COUNT(*) AS request_count,
-      SUM(CASE WHEN task_type = 'Word to Color' THEN 1 ELSE 0 END) AS word_count,
-      SUM(CASE WHEN task_type = 'Color to Emotion' THEN 1 ELSE 0 END) AS color_count,
-      MIN(created_at) AS started_at, MAX(created_at) AS completed_at
-      FROM trial_results
-      WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'
-      GROUP BY model_id, model_alias, run_index
-      ORDER BY model_alias, run_index`).bind(PROJECT_ID).all(),
+    db.prepare(`WITH run_groups AS (
+        SELECT model_id, model_alias, run_index FROM trial_results
+        WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'
+        UNION
+        SELECT model_id, model_alias, run_index FROM trial_attempts
+        WHERE project_id = ? AND run_index > 0
+      )
+      SELECT g.model_id, g.model_alias, g.run_index,
+        (SELECT COUNT(*) FROM trial_results r
+          WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index
+            AND r.validation_status = 'Valid') AS request_count,
+        (SELECT COUNT(*) FROM trial_results r
+          WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index
+            AND r.validation_status = 'Valid' AND r.task_type = 'Word to Color') AS word_count,
+        (SELECT COUNT(*) FROM trial_results r
+          WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index
+            AND r.validation_status = 'Valid' AND r.task_type = 'Color to Emotion') AS color_count,
+        (SELECT COUNT(*) FROM trial_attempts a
+          WHERE a.project_id = ? AND a.model_id = g.model_id AND a.run_index = g.run_index
+            AND a.status != 'success') AS failed_attempt_count,
+        COALESCE(
+          (SELECT MIN(created_at) FROM trial_attempts a WHERE a.project_id = ? AND a.model_id = g.model_id AND a.run_index = g.run_index),
+          (SELECT MIN(created_at) FROM trial_results r WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index)
+        ) AS started_at,
+        COALESCE(
+          (SELECT MAX(created_at) FROM trial_attempts a WHERE a.project_id = ? AND a.model_id = g.model_id AND a.run_index = g.run_index),
+          (SELECT MAX(created_at) FROM trial_results r WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index)
+        ) AS completed_at
+      FROM run_groups g
+      ORDER BY g.model_alias, g.run_index`)
+      .bind(PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID,
+        PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID).all(),
     db.prepare(`SELECT COALESCE(MAX(run_index), 0) + 1 AS next_run_index
       FROM trial_results
       WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'`).bind(PROJECT_ID).first(),
+    db.prepare(`SELECT attempt_id, logical_trial_id, model_id, model_alias, task_type,
+      run_index, stimulus_id, attempt_no, status, http_status, retryable,
+      error_message, raw_response, latency_ms, created_at
+      FROM trial_attempts
+      WHERE project_id = ? AND status != 'success'
+      ORDER BY created_at DESC LIMIT 50`).bind(PROJECT_ID).all(),
   ]);
-  return Response.json({ project, models: models.results, settings, results: results.results, counts: counts.results, groupSummaries: groupSummaries.results, nextRunIndex: Number(nextRun?.next_run_index || 1) });
+  return Response.json({
+    project, models: models.results, settings, results: results.results,
+    counts: counts.results, groupSummaries: groupSummaries.results,
+    nextRunIndex: Number(nextRun?.next_run_index || 1),
+    recentFailures: recentFailures.results,
+  });
 }
 
 export async function POST(request: Request) {

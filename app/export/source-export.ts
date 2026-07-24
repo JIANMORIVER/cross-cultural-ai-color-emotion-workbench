@@ -65,6 +65,26 @@ export type ExportPayload = {
   models: ExportModel[];
   settings: ExportSettings;
   results: ExportResult[];
+  failures?: ExportFailure[];
+  export_scope?: "complete" | "available";
+};
+
+export type ExportFailure = {
+  attempt_id: string;
+  logical_trial_id: string;
+  model_id: string;
+  model_alias: string;
+  task_type: string;
+  run_index: number;
+  stimulus_id: string;
+  attempt_no: number;
+  status: string;
+  http_status: number | null;
+  retryable: number | boolean;
+  error_message: string;
+  raw_response: string;
+  latency_ms: number;
+  created_at: string;
 };
 
 export const WORD_TO_COLOR_COLUMNS = [
@@ -128,6 +148,12 @@ function completeFormalResults(results: ExportResult[]) {
     .filter(([, group]) => group.word.size === 20 && group.color.size === 11)
     .map(([key]) => key));
   return formal.filter(result => completeKeys.has(`${result.model_id || result.model_alias}\u0000${result.run_index}`));
+}
+
+function exportableFormalResults(payload: ExportPayload) {
+  return payload.export_scope === "available"
+    ? payload.results.filter(isFormalResult)
+    : completeFormalResults(payload.results);
 }
 
 function parseJsonText(value: string): unknown {
@@ -211,7 +237,7 @@ function scoreList(value: unknown) {
 
 export function buildWordToColorRows(payload: ExportPayload, emotions: readonly string[]): ExportSheetRow[] {
   const groups = new Map<string, ExportResult[]>();
-  completeFormalResults(payload.results).filter(result => isWordToColor(result.task_type)).forEach(result => {
+  exportableFormalResults(payload).filter(result => isWordToColor(result.task_type)).forEach(result => {
     const key = `${result.model_id || result.model_alias}\u0000${result.run_index}`;
     groups.set(key, [...(groups.get(key) ?? []), result]);
   });
@@ -251,7 +277,7 @@ export function buildWordToColorRows(payload: ExportPayload, emotions: readonly 
 
 export function buildColorToEmotionRows(payload: ExportPayload, colors: ReadonlyArray<readonly [string, string]>): ExportSheetRow[] {
   const colorMap = new Map(colors);
-  return completeFormalResults(payload.results).filter(result => isColorToEmotion(result.task_type)).map(result => {
+  return exportableFormalResults(payload).filter(result => isColorToEmotion(result.task_type)).map(result => {
     const model = modelFor(payload, result);
     return {
       "实验ID": result.run_index,
@@ -274,7 +300,7 @@ export function buildColorToEmotionRows(payload: ExportPayload, colors: Readonly
 
 export function buildColorToEmotionSourceRows(payload: ExportPayload, colors: ReadonlyArray<readonly [string, string]>): ExportSheetRow[] {
   const groups = new Map<string, ExportResult[]>();
-  completeFormalResults(payload.results).filter(result => isColorToEmotion(result.task_type)).forEach(result => {
+  exportableFormalResults(payload).filter(result => isColorToEmotion(result.task_type)).forEach(result => {
     const key = `${result.model_id || result.model_alias}\u0000${result.run_index}`;
     groups.set(key, [...(groups.get(key) ?? []), result]);
   });
@@ -301,7 +327,7 @@ export function buildColorToEmotionSourceRows(payload: ExportPayload, colors: Re
 
 export function buildSampleRows(payload: ExportPayload, colors: ReadonlyArray<readonly [string, string]>): ExportSheetRow[] {
   const groups = new Map<string, ExportResult[]>();
-  completeFormalResults(payload.results).forEach(result => {
+  exportableFormalResults(payload).forEach(result => {
     const key = `${result.model_id || result.model_alias}\u0000${result.run_index}`;
     groups.set(key, [...(groups.get(key) ?? []), result]);
   });
@@ -330,7 +356,7 @@ export function buildSampleRows(payload: ExportPayload, colors: ReadonlyArray<re
 
 export function buildSampleManifestRows(payload: ExportPayload): ExportSheetRow[] {
   const groups = new Map<string, ExportResult[]>();
-  completeFormalResults(payload.results).forEach(result => {
+  exportableFormalResults(payload).forEach(result => {
     const key = `${result.model_id || result.model_alias}\u0000${result.run_index}`;
     groups.set(key, [...(groups.get(key) ?? []), result]);
   });
@@ -430,12 +456,21 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
     })),
     word_to_color_source: wordRows,
     color_to_emotion_source: colorRows,
-    invalid_records: payload.results.filter(result => result.validation_status !== "Valid").map(result => ({
-      "试次ID": result.trial_id, "模型别名": result.model_alias, "任务": result.task_type,
-      "重复轮次": result.run_index, "刺激项": result.stimulus_id,
-      "源回答": result.raw_response, "清洗记录": result.clean_json,
-      "状态": result.validation_status, "重试次数": result.retry_count,
-      "延迟(ms)": result.latency_ms, "生成时间": result.created_at,
+    invalid_records: (payload.failures ?? []).map(failure => ({
+      "尝试ID": failure.attempt_id,
+      "试次ID": failure.logical_trial_id,
+      "模型别名": failure.model_alias,
+      "任务": failure.task_type,
+      "重复轮次": failure.run_index,
+      "刺激项": failure.stimulus_id,
+      "尝试次数": failure.attempt_no + 1,
+      "失败类别": failure.status,
+      "HTTP状态": failure.http_status,
+      "可重试": Boolean(failure.retryable),
+      "失败原因": failure.error_message,
+      "源回答": failure.raw_response,
+      "延迟(ms)": failure.latency_ms,
+      "生成时间": failure.created_at,
     })),
   } satisfies Record<string, ExportSheetRow[]>;
 }

@@ -80,8 +80,27 @@ type RunGroupSummary = {
   request_count: number;
   word_count: number;
   color_count: number;
+  failed_attempt_count?: number;
   started_at: string;
   completed_at: string;
+};
+
+type FailureAttempt = {
+  attempt_id: string;
+  logical_trial_id: string;
+  model_id: string;
+  model_alias: string;
+  task_type: string;
+  run_index: number;
+  stimulus_id: string;
+  attempt_no: number;
+  status: string;
+  http_status: number | null;
+  retryable: number | boolean;
+  error_message: string;
+  raw_response: string;
+  latency_ms: number;
+  created_at: string;
 };
 
 const EMOTIONS = [
@@ -207,7 +226,9 @@ export function ExperimentPlatform() {
   const [lastRunError, setLastRunError] = useState("");
   const [runActivity, setRunActivity] = useState("");
   const [groupSummaries, setGroupSummaries] = useState<RunGroupSummary[]>([]);
+  const [recentFailures, setRecentFailures] = useState<FailureAttempt[]>([]);
   const [selectedExportGroups, setSelectedExportGroups] = useState<string[] | null>(null);
+  const [includeIncompleteExports, setIncludeIncompleteExports] = useState(true);
   const [filterTask, setFilterTask] = useState("All tasks");
   const [filterModel, setFilterModel] = useState("All models");
   const [exporting, setExporting] = useState<"" | "word" | "color" | "sample" | "source">("");
@@ -219,6 +240,7 @@ export function ExperimentPlatform() {
       if (data.settings) setSettings(data.settings);
       if (data.results) setResults(data.results);
       if (data.groupSummaries) setGroupSummaries(data.groupSummaries);
+      if (data.recentFailures) setRecentFailures(data.recentFailures);
     }).catch(() => setNotice("当前为离线模式——更改只保留在本次预览中。")).finally(() => setLoading(false));
   }, []);
 
@@ -226,6 +248,7 @@ export function ExperimentPlatform() {
     if (page !== "export") return;
     fetch("/api/workspace", { cache: "no-store" }).then(response => response.ok ? response.json() : Promise.reject()).then(data => {
       if (data.groupSummaries) setGroupSummaries(data.groupSummaries);
+      if (data.recentFailures) setRecentFailures(data.recentFailures);
     }).catch(() => setNotice("正式数据组列表刷新失败，请稍后重试。"));
   }, [page]);
 
@@ -270,7 +293,11 @@ export function ExperimentPlatform() {
     if (!apiKey) { setNotice("请先输入临时 API Key，再测试连接。"); return; }
     setTesting(true); setNotice("正在发送最小 JSON 请求…");
     try {
-      const response = await fetch("/api/model-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey, baseUrl: selectedModel.base_url, modelId: selectedModel.model_id }) });
+      const response = await fetch("/api/model-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey, model: selectedModel, settings }),
+      });
       const data = await response.json();
       const status = data.ok ? "Connected" : "Failed";
       patchModel({ last_test_status: status, latency_ms: data.latencyMs || null });
@@ -357,6 +384,24 @@ export function ExperimentPlatform() {
     if (!runModels.length || !totalRequests) { setNotice("请先选择至少一个模型和一个实验任务，再生成队列。"); return; }
     const missing = runModels.filter(m => !keys[m.id]);
     if (missing.length) { setNotice(`开始前请为 ${missing.map(m => m.alias).join("、")} 添加临时 API Key。`); return; }
+    setNotice("正在执行正式运行前检查：连接、任务一格式、任务二格式…");
+    for (const model of runModels) {
+      try {
+        const preflightResponse = await fetch("/api/model-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey: keys[model.id], model, settings }),
+        });
+        const preflight = await preflightResponse.json().catch(() => ({})) as { ok?: boolean; message?: string };
+        if (!preflightResponse.ok || !preflight.ok) {
+          setNotice(`${model.alias} 未通过运行前检查：${preflight.message || `HTTP ${preflightResponse.status}`}。队列未启动，避免产生整批失败。`);
+          return;
+        }
+      } catch (error) {
+        setNotice(`${model.alias} 运行前检查未完成：${error instanceof Error ? error.message : "网络异常"}。队列未启动。`);
+        return;
+      }
+    }
     let firstRunIndex = 1;
     try {
       const sequenceResponse = await fetch("/api/workspace", { cache: "no-store" });
@@ -479,6 +524,17 @@ export function ExperimentPlatform() {
       setRunActivity("");
       setProject(current => ({ ...current, status: "Completed" }));
       await persist("setStatus", { status: "Completed" }, "实验队列已执行完成；有效结果已写入本地数据库。");
+      try {
+        const refreshResponse = await fetch("/api/workspace", { cache: "no-store" });
+        if (refreshResponse.ok) {
+          const refreshed = await refreshResponse.json();
+          if (refreshed.results) setResults(refreshed.results);
+          if (refreshed.groupSummaries) setGroupSummaries(refreshed.groupSummaries);
+          if (refreshed.recentFailures) setRecentFailures(refreshed.recentFailures);
+        }
+      } catch {
+        // The saved server data remains authoritative and will refresh on the next page load.
+      }
     }
   }
 
@@ -496,11 +552,14 @@ export function ExperimentPlatform() {
     const response = await fetch("/api/export-data", { cache: "no-store" });
     if (!response.ok) throw new Error("导出数据读取失败");
     const payload = await response.json() as ExportPayload;
-    const completeKeys = groupSummaries.filter(isCompleteRunGroup).map(group => runGroupKey(group.model_id, group.run_index));
-    const selected = new Set(selectedExportGroups === null ? completeKeys : selectedExportGroups.filter(key => completeKeys.includes(key)));
+    const eligibleGroups = includeIncompleteExports ? groupSummaries : groupSummaries.filter(isCompleteRunGroup);
+    const eligibleKeys = eligibleGroups.map(group => runGroupKey(group.model_id, group.run_index));
+    const selected = new Set(selectedExportGroups === null ? eligibleKeys : selectedExportGroups.filter(key => eligibleKeys.includes(key)));
     return {
       ...payload,
+      export_scope: includeIncompleteExports ? "available" as const : "complete" as const,
       results: payload.results.filter(result => selected.has(runGroupKey(result.model_id, result.run_index))),
+      failures: (payload.failures ?? []).filter(failure => selected.has(runGroupKey(failure.model_id, failure.run_index))),
     };
   }
 
@@ -618,8 +677,8 @@ export function ExperimentPlatform() {
           {page === "models" && <ModelsPage models={models} selected={selectedModel} select={setSelectedModelId} patch={patchModel} save={saveModel} apiKey={keys[selectedModel.id] || ""} setKey={setKey} testing={testing} test={testConnection} pilotTesting={pilotTesting} pilotTest={pilotTest} prepareSingle={() => prepareSingleModel(selectedModel.id)} />}
           {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
           {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} keys={keys} lastError={lastRunError} activity={runActivity} />}
-          {page === "review" && <ReviewPage results={filteredResults} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
-          {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
+          {page === "review" && <ReviewPage results={filteredResults} failures={recentFailures} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
+          {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} includeIncomplete={includeIncompleteExports} setIncludeIncomplete={setIncludeIncompleteExports} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
           {page === "analysis" && <AnalysisPlatform />}
         </div>
       </main>
@@ -705,7 +764,7 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
         </div>
         <div className="capabilities"><label><input type="checkbox" checked={bool(selected.supports_json)} onChange={e => patch({ supports_json: e.target.checked })} /> JSON 模式</label><label><input type="checkbox" checked={bool(selected.supports_seed)} onChange={e => patch({ supports_seed: e.target.checked })} /> 支持 Seed</label><span>API 格式：{selected.api_format}</span></div>
         <div className="pilot-callout"><div><span className="eyebrow">只测当前模型</span><b>分别验证两个实验任务</b><p>实验一试跑 Interest → Color；实验二试跑 J0 → 可选 1–20 个情绪、每项 1–5 级。两次都会真实请求并保存结果。</p></div><div><button className="secondary" onClick={() => pilotTest("word")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "word" ? "实验一试跑中…" : "试跑实验一"}</button><button className="secondary" onClick={() => pilotTest("color")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "color" ? "实验二试跑中…" : "试跑实验二"}</button><button className="primary" onClick={prepareSingle}>设置为单模型 Pilot <span>→</span></button></div></div>
-        <div className="detail-actions"><button className="secondary" onClick={test} disabled={testing || Boolean(pilotTesting)}>{testing ? "测试中…" : "仅测试连接"}</button><button className="primary" onClick={save}>保存配置</button>{selected.latency_ms ? <span className="latency">最近延迟 <b>{selected.latency_ms} ms</b></span> : null}</div>
+        <div className="detail-actions"><button className="secondary" onClick={test} disabled={testing || Boolean(pilotTesting)}>{testing ? "验证中…" : "验证连接与两项格式"}</button><button className="primary" onClick={save}>保存配置</button>{selected.latency_ms ? <span className="latency">最近延迟 <b>{selected.latency_ms} ms</b></span> : null}</div>
       </section>
     </div>
   </>;
@@ -795,7 +854,7 @@ function RunnerPage({ state, setState, start, total, stats, modelProgress, setti
   </>;
 }
 
-function ReviewPage({ results, models, groupSummaries, filterTask, setFilterTask, filterModel, setFilterModel }: { results: ResultRow[]; models: Model[]; groupSummaries: RunGroupSummary[]; filterTask: string; setFilterTask: (s: string) => void; filterModel: string; setFilterModel: (s: string) => void }) {
+function ReviewPage({ results, failures, models, groupSummaries, filterTask, setFilterTask, filterModel, setFilterModel }: { results: ResultRow[]; failures: FailureAttempt[]; models: Model[]; groupSummaries: RunGroupSummary[]; filterTask: string; setFilterTask: (s: string) => void; filterModel: string; setFilterModel: (s: string) => void }) {
   const groupedResults = new Map<string, ResultRow[]>();
   results.forEach(result => {
     const groupName = result.trial_id.startsWith("pilot-") || result.run_index <= 0 ? `${result.model_id}\u0000pilot` : `${result.model_id}\u0000${result.run_index}`;
@@ -805,18 +864,21 @@ function ReviewPage({ results, models, groupSummaries, filterTask, setFilterTask
     <PageTitle index="05" title="审阅采集数据" subtitle="将每个清洗后的数值追溯至原始响应、Prompt 版本和校验事件。" action={<button className="secondary">＋ 高级筛选</button>} />
     <section className="panel review-panel">
       <div className="filter-bar"><div><label>实验任务<select value={filterTask} onChange={e => setFilterTask(e.target.value)}><option value="All tasks">全部任务</option><option value="Word to Color">词选色</option><option value="Color to Emotion">色选词</option></select></label><label>模型<select value={filterModel} onChange={e => setFilterModel(e.target.value)}><option value="All models">全部模型</option>{models.map(m => <option key={m.id}>{m.alias}</option>)}</select></label><label>校验状态<select><option>全部状态</option><option>有效</option><option>无效</option></select></label></div><span>{groupedResults.size} 组数据 · {results.length} 条底层请求</span></div>
-      {results.length ? <div className="review-groups">{[...groupedResults.entries()].map(([groupId, group]) => { const first = group[0]; const pilot = groupId.endsWith("\u0000pilot"); const summary = groupSummaries.find(item => item.model_id === first.model_id && Number(item.run_index) === Number(first.run_index)); const wordCount = pilot ? new Set(group.filter(row => row.task_type === "Word to Color").map(row => row.stimulus_id)).size : Number(summary?.word_count || 0); const colorCount = pilot ? new Set(group.filter(row => row.task_type === "Color to Emotion").map(row => row.stimulus_id)).size : Number(summary?.color_count || 0); const complete = wordCount === 20 && colorCount === 11; return <section className={`review-run-group ${complete ? "complete" : "incomplete"}`} key={groupId}><div className="review-run-head"><div><span>{pilot ? "单模型测试" : complete ? `第 ${first.run_index} 次完整实验` : `第 ${first.run_index} 次（未完成）`}</span><b>{first.model_alias}</b></div><small>词选色 {wordCount}/20 · 色选词 {colorCount}/11 · {complete ? "可作为 1 组导出" : "不能计为完整数据组"}</small></div><div className="data-table"><div className="data-head"><span>试次 ID</span><span>模型</span><span>任务</span><span>刺激项</span><span>清洗结果</span><span>状态</span><span>延迟</span></div>{group.map(r => <div className="data-row" key={r.trial_id}><span className="mono">{r.trial_id}</span><span>{r.model_alias}</span><span>{r.task_type}</span><span>{r.stimulus_id}</span><span className="mono truncate">{r.clean_json}</span><span><Pill tone={r.validation_status === "Valid" ? "green" : "red"}>{r.validation_status === "Valid" ? "有效" : "无效"}</Pill></span><span>{r.latency_ms} ms</span></div>)}</div></section>; })}</div> : <div className="empty-state"><div className="empty-orbit"><span>0</span></div><h3>尚无模型观察数据</h3><p>完成一次 Pilot 后，这里会显示可追溯的数据记录。实验配置和研究材料目前已可导出。</p><button className="secondary">打开实验运行页 <span>→</span></button></div>}
+      {failures.length ? <section className="review-run-group incomplete"><div className="review-run-head"><div><span>最近失败记录</span><b>{failures.length} 条可诊断请求</b></div><small>失败请求现在会永久记录；修复后重新运行不会覆盖已有有效结果。</small></div><div className="data-table"><div className="data-head"><span>试次 ID</span><span>模型</span><span>任务</span><span>刺激项</span><span>失败原因</span><span>HTTP</span><span>时间</span></div>{failures.map(failure => <div className="data-row" key={failure.attempt_id}><span className="mono">{failure.logical_trial_id}</span><span>{failure.model_alias}</span><span>{failure.task_type}</span><span>{failure.stimulus_id}</span><span className="truncate" title={failure.error_message}>{failure.error_message}</span><span><Pill tone="red">{failure.http_status || failure.status}</Pill></span><span>{new Date(failure.created_at).toLocaleString("zh-CN")}</span></div>)}</div></section> : null}
+      {results.length ? <div className="review-groups">{[...groupedResults.entries()].map(([groupId, group]) => { const first = group[0]; const pilot = groupId.endsWith("\u0000pilot"); const summary = groupSummaries.find(item => item.model_id === first.model_id && Number(item.run_index) === Number(first.run_index)); const wordCount = pilot ? new Set(group.filter(row => row.task_type === "Word to Color").map(row => row.stimulus_id)).size : Number(summary?.word_count || 0); const colorCount = pilot ? new Set(group.filter(row => row.task_type === "Color to Emotion").map(row => row.stimulus_id)).size : Number(summary?.color_count || 0); const complete = wordCount === 20 && colorCount === 11; return <section className={`review-run-group ${complete ? "complete" : "incomplete"}`} key={groupId}><div className="review-run-head"><div><span>{pilot ? "单模型测试" : complete ? `第 ${first.run_index} 次完整实验` : `第 ${first.run_index} 次（未完成）`}</span><b>{first.model_alias}</b></div><small>词选色 {wordCount}/20 · 色选词 {colorCount}/11 · {complete ? "可作为 1 组正式导出" : `可抢救导出 · 已记录失败 ${summary?.failed_attempt_count || 0} 次`}</small></div><div className="data-table"><div className="data-head"><span>试次 ID</span><span>模型</span><span>任务</span><span>刺激项</span><span>清洗结果</span><span>状态</span><span>延迟</span></div>{group.map(r => <div className="data-row" key={r.trial_id}><span className="mono">{r.trial_id}</span><span>{r.model_alias}</span><span>{r.task_type}</span><span>{r.stimulus_id}</span><span className="mono truncate">{r.clean_json}</span><span><Pill tone={r.validation_status === "Valid" ? "green" : "red"}>{r.validation_status === "Valid" ? "有效" : "无效"}</Pill></span><span>{r.latency_ms} ms</span></div>)}</div></section>; })}</div> : failures.length ? null : <div className="empty-state"><div className="empty-orbit"><span>0</span></div><h3>尚无模型观察数据</h3><p>完成一次 Pilot 后，这里会显示可追溯的数据记录。实验配置和研究材料目前已可导出。</p><button className="secondary">打开实验运行页 <span>→</span></button></div>}
     </section>
   </>;
 }
 
-function ExportPage({ project, results, expectedGroups, groupSummaries, selectedGroups, setSelectedGroups, exporting, exportConfig, exportCsv, exportSourceCsv, exportSampleWorkbook, exportSourceWorkbook }: {
+function ExportPage({ project, results, expectedGroups, groupSummaries, selectedGroups, setSelectedGroups, includeIncomplete, setIncludeIncomplete, exporting, exportConfig, exportCsv, exportSourceCsv, exportSampleWorkbook, exportSourceWorkbook }: {
   project: Project;
   results: ResultRow[];
   expectedGroups: number;
   groupSummaries: RunGroupSummary[];
   selectedGroups: string[] | null;
   setSelectedGroups: (groups: string[] | null) => void;
+  includeIncomplete: boolean;
+  setIncludeIncomplete: (include: boolean) => void;
   exporting: "" | "word" | "color" | "sample" | "source";
   exportConfig: () => void;
   exportCsv: (k: "emotions" | "colors") => void;
@@ -826,7 +888,8 @@ function ExportPage({ project, results, expectedGroups, groupSummaries, selected
 }) {
   const completeGroupSummaries = groupSummaries.filter(isCompleteRunGroup);
   const incompleteGroupSummaries = groupSummaries.filter(group => !isCompleteRunGroup(group));
-  const allGroupKeys = completeGroupSummaries.map(group => runGroupKey(group.model_id, group.run_index));
+  const eligibleGroupSummaries = includeIncomplete ? groupSummaries : completeGroupSummaries;
+  const allGroupKeys = eligibleGroupSummaries.map(group => runGroupKey(group.model_id, group.run_index));
   const selectedSet = new Set(selectedGroups === null ? allGroupKeys : selectedGroups);
   const selectedCount = allGroupKeys.filter(key => selectedSet.has(key)).length;
   const hasSelectedData = selectedCount > 0;
@@ -839,14 +902,15 @@ function ExportPage({ project, results, expectedGroups, groupSummaries, selected
     <PageTitle index="06" title="打包可复现数据" subtitle="不拆分情绪、不换算颜色空间，直接保留模型返回的源色彩字段与评分结构。" />
     <section className="archive-hero"><div><span className="eyebrow">可复现研究包</span><h2>{project.name}</h2><p>{project.id} · 实验版本 v{project.experiment_version} · 已采集 {results.length.toLocaleString()} 条试次记录</p></div><div className="archive-status"><Pill tone="green">已排除 API Key</Pill><Pill tone="green">已附版本信息</Pill><Pill tone="green">UTF-8 编码</Pill></div></section>
     <section className="panel export-selection">
-      <div className="panel-head"><div><h3>选择本次要导出的数据</h3><p>按“模型＋完整实验轮次”勾选；下面所有结果导出按钮都会使用同一选择。</p></div><div className="selection-actions"><button type="button" onClick={() => setSelectedGroups(null)}>全选</button><button type="button" onClick={() => setSelectedGroups([])}>清空</button></div></div>
-      {groupSummaries.length ? <><div className="selection-summary"><strong>{selectedCount}</strong><span>/ {completeGroupSummaries.length} 个完整组已选择</span><small>{selectedCount === completeGroupSummaries.length ? "当前为全部完整组；每组含 20/20 词选色 + 11/11 色选词" : `当前只会导出勾选的 ${selectedCount} 组`}</small></div>{completeGroupSummaries.length ? <div className="export-group-list">{completeGroupSummaries.map(group => { const key = runGroupKey(group.model_id, group.run_index); const selected = selectedSet.has(key); return <label key={key} className={selected ? "selected" : ""}><input type="checkbox" checked={selected} onChange={() => toggleGroup(key)} /><span><b>{group.model_alias} · 第 {group.run_index} 次完整实验</b><small>词选色 20/20 · 色选词 11/11 · 31 条有效结果</small></span></label>; })}</div> : <div className="selection-empty">目前还没有同时集齐 20 个词选色和 11 个色选词的完整数据组。</div>}{incompleteGroupSummaries.length ? <div className="incomplete-groups"><b>{incompleteGroupSummaries.length} 个未完成轮次不会导出</b>{incompleteGroupSummaries.map(group => <span key={runGroupKey(group.model_id, group.run_index)}>{group.model_alias} 第 {group.run_index} 次：词选色 {group.word_count}/20，色选词 {group.color_count}/11</span>)}</div> : null}</> : <div className="selection-empty">尚无正式实验数据。完成正式运行后，可在这里选择指定轮次导出。</div>}
+      <div className="panel-head"><div><h3>选择本次要导出的数据</h3><p>抢救模式会保留已有有效值，缺失刺激项留空，并把失败详情写入 invalid_records。</p></div><div className="selection-actions"><button type="button" onClick={() => setSelectedGroups(null)}>全选</button><button type="button" onClick={() => setSelectedGroups([])}>清空</button></div></div>
+      <div className="scope-buttons"><button type="button" className={includeIncomplete ? "active" : ""} onClick={() => { setIncludeIncomplete(true); setSelectedGroups(null); }}><b>抢救导出</b><small>包含未完成轮次（推荐）</small></button><button type="button" className={!includeIncomplete ? "active" : ""} onClick={() => { setIncludeIncomplete(false); setSelectedGroups(null); }}><b>严格正式导出</b><small>仅 20/20 + 11/11 完整轮次</small></button></div>
+      {groupSummaries.length ? <><div className="selection-summary"><strong>{selectedCount}</strong><span>/ {eligibleGroupSummaries.length} 个轮次已选择</span><small>{includeIncomplete ? "缺失值会留空，失败原因会随工作簿一并导出" : "只导出两项任务均完整的正式轮次"}</small></div>{eligibleGroupSummaries.length ? <div className="export-group-list">{eligibleGroupSummaries.map(group => { const key = runGroupKey(group.model_id, group.run_index); const selected = selectedSet.has(key); const complete = isCompleteRunGroup(group); return <label key={key} className={selected ? "selected" : ""}><input type="checkbox" checked={selected} onChange={() => toggleGroup(key)} /><span><b>{group.model_alias} · 第 {group.run_index} 次{complete ? "完整实验" : "（未完成）"}</b><small>词选色 {group.word_count}/20 · 色选词 {group.color_count}/11 · {complete ? "31 条有效结果" : `失败尝试 ${group.failed_attempt_count || 0} 次`}</small></span></label>; })}</div> : <div className="selection-empty">目前还没有同时集齐 20 个词选色和 11 个色选词的完整数据组。</div>}{!includeIncomplete && incompleteGroupSummaries.length ? <div className="incomplete-groups"><b>{incompleteGroupSummaries.length} 个未完成轮次已被严格模式排除</b>{incompleteGroupSummaries.map(group => <span key={runGroupKey(group.model_id, group.run_index)}>{group.model_alias} 第 {group.run_index} 次：词选色 {group.word_count}/20，色选词 {group.color_count}/11</span>)}</div> : null}</> : <div className="selection-empty">尚无正式实验数据。完成正式运行后，可在这里选择指定轮次导出。</div>}
     </section>
     <div className="export-grid">
       <article><span className="file-type json">{`{ }`}</span><div><h3>实验配置</h3><p>包括项目元数据、模型参数、锁定条件、Prompt 和实验材料版本。</p><small>JSON · 现在可用</small></div><button onClick={exportConfig}>下载 JSON <span>↓</span></button></article>
       <article><span className="file-type csv">CSV</span><div><h3>实验材料</h3><p>用于组成 Prompt 的标准 20 个情绪词和 11 个匿名色码。</p><small>2 个 CSV 文件 · 现在可用</small></div><div className="split-buttons"><button onClick={() => exportCsv("emotions")}>情绪词 ↓</button><button onClick={() => exportCsv("colors")}>颜色 ↓</button></div></article>
       <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type data">源数据</span><div><h3>源格式实验结果</h3><p>词选色按“模型 × 重复轮次”合并，不再每个情绪一行；色选词保留完整评分 JSON。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 组` : "请先选择数据组"}</small></div><div className="split-buttons"><button disabled={!hasSelectedData || Boolean(exporting)} onClick={() => exportSourceCsv("word")}>{exporting === "word" ? "整理中…" : "导出选中词选色 ↓"}</button><button disabled={!hasSelectedData || Boolean(exporting)} onClick={() => exportSourceCsv("color")}>{exporting === "color" ? "整理中…" : "导出选中色选词 ↓"}</button></div></article>
-      <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">样本</span><div><h3>按完整实验轮次导出</h3><p>每个模型的每次完整实验单独一行；Pilot 测试不会混入正式数据。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 行 · 计划总数 ${expectedGroups.toLocaleString()} 行` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSampleWorkbook}>{exporting === "sample" ? "正在生成…" : "导出选中轮次"} <span>↓</span></button></article>
+      <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">样本</span><div><h3>按实验轮次导出</h3><p>每个模型的每次实验单独一行；抢救模式下缺失刺激项留空，Pilot 不会混入。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 行 · 计划总数 ${expectedGroups.toLocaleString()} 行` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSampleWorkbook}>{exporting === "sample" ? "正在生成…" : "导出选中轮次"} <span>↓</span></button></article>
       <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">源文件</span><div><h3>原始多模型格式工作簿</h3><p>沿用豆包文件的 9 列主表布局，只包含上方勾选的模型和轮次。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 组 · 3 个工作表` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSourceWorkbook}>{exporting === "source" ? "正在生成…" : "导出选中源文件"} <span>↓</span></button></article>
     </div>
     <section className="export-manifest panel"><div className="panel-head"><div><h3>实验条件记录</h3><p>两种 XLSX 都记录 Temperature、Top P、最大输出长度、重复次数和 A/B/C 随机性方案开关；API Key 始终排除。</p></div><span className="manifest-id">可复现条件 · 源回答</span></div><div className="manifest-grid">{["sample_91_columns", "row_manifest", "experiment_conditions", "word_to_color_source", "color_to_emotion_source", "randomness_policy"].map((x, i) => <span key={x}><i>{String(i + 1).padStart(2, "0")}</i>{x}<b>{i < 3 || results.length ? "就绪" : "待生成"}</b></span>)}</div></section>

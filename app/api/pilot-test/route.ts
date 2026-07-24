@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import { applyRandomnessPolicy } from "../../experiment/randomness";
-import { buildColorToEmotionPrompt, EXPERIMENT_EMOTIONS, type OrderPolicy } from "../../experiment/prompts";
+import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
+import { buildChatRequest, safeEndpoint } from "../../experiment/model-request";
+import { parseAssociationResponse, parseColorResponse } from "../../experiment/response-parser";
 
 const PROJECT_ID = "ECX-2026-001";
 
@@ -17,61 +19,6 @@ type PilotModel = {
   supports_json: number | boolean;
 };
 
-function enabled(value: number | boolean) {
-  return value === true || value === 1;
-}
-
-function isGpt56(modelId: string) {
-  return /^gpt-5\.6(?:-|$)/i.test(modelId);
-}
-
-function safeEndpoint(baseUrl: string) {
-  const url = new URL(baseUrl);
-  if (url.protocol !== "https:") throw new Error("只允许使用 HTTPS 模型接口。");
-  const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local") || /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)) {
-    throw new Error("不允许访问本地或私有网络模型地址。");
-  }
-  return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
-}
-
-function parseModelJson(content: string) {
-  const clean = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  const start = clean.indexOf("{");
-  const end = clean.lastIndexOf("}");
-  const candidate = start >= 0 && end > start ? clean.slice(start, end + 1) : clean;
-  const parsed = JSON.parse(candidate) as Record<string, unknown>;
-  const nested = parsed.Interest && typeof parsed.Interest === "object" ? parsed.Interest as Record<string, unknown> : parsed;
-  const hex = String(nested.hex || "");
-  if (!/^#[0-9A-F]{6}$/i.test(hex)) throw new Error("模型已响应，但没有返回有效的 HEX 色值。");
-  return { parsed: nested, hex: hex.toUpperCase() };
-}
-
-function parseAssociations(content: string) {
-  const clean = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  const start = clean.indexOf("{");
-  const end = clean.lastIndexOf("}");
-  const parsed = JSON.parse(start >= 0 && end > start ? clean.slice(start, end + 1) : clean) as Record<string, unknown>;
-  const values = Array.isArray(parsed) ? parsed : parsed.associations;
-  if (!Array.isArray(values) || values.length < 1 || values.length > EXPERIMENT_EMOTIONS.length) {
-    throw new Error("模型已响应，但关联结果必须包含 1–20 个情绪。");
-  }
-  const canonical = new Map(EXPERIMENT_EMOTIONS.map(emotion => [emotion.toLowerCase(), emotion]));
-  const used = new Set<string>();
-  const associations = values.map(value => {
-    if (!value || typeof value !== "object") throw new Error("情绪关联项格式无效。");
-    const item = value as Record<string, unknown>;
-    const emotion = canonical.get(String(item.emotion || "").toLowerCase());
-    const intensity = Number(item.intensity);
-    if (!emotion) throw new Error(`模型返回了不在词表中的情绪：${String(item.emotion || "空值")}`);
-    if (!Number.isInteger(intensity) || intensity < 1 || intensity > 5) throw new Error(`${emotion} 的强度必须是 1–5 的整数。`);
-    if (used.has(emotion)) throw new Error(`模型重复返回了情绪：${emotion}`);
-    used.add(emotion);
-    return { emotion, intensity };
-  });
-  return { associations };
-}
-
 export async function POST(request: Request) {
   const started = Date.now();
   try {
@@ -81,28 +28,11 @@ export async function POST(request: Request) {
     }
 
     const task = body.task === "color" ? "color" : "word";
+    body.apiKey = body.apiKey.trim();
     const colorPrompt = buildColorToEmotionPrompt("J0", "#262626", body.settings, 1, 0);
-    const basePrompt = task === "color" ? colorPrompt.prompt : `You are participating in an emotion-color association experiment.
-For the English emotion word "Interest", choose the single sRGB color you most intuitively associate with it.
-Return exactly one JSON object with the model's original color fields in this structure:
-{"h": 0, "s": 0, "l": 0, "hex": "#000000"}
-h must be 0-360; s and l must be 0-100. Do not add markdown or commentary.`;
+    const basePrompt = task === "color" ? colorPrompt.prompt : buildWordToColorPrompt("Interest");
     const policy = applyRandomnessPolicy(basePrompt, body.settings, 1, 0, body.model.supports_seed);
-    const tokenLimit = Math.max(64, Math.min(32768, Number(body.model.max_tokens) || 500));
-    const requestBody: Record<string, unknown> = {
-      model: body.model.model_id,
-      messages: [{ role: "user", content: policy.prompt }],
-      temperature: Number(body.model.temperature),
-      top_p: Number(body.model.top_p),
-    };
-    if (isGpt56(body.model.model_id)) {
-      requestBody.max_completion_tokens = tokenLimit;
-      requestBody.reasoning_effort = "none";
-    } else {
-      requestBody.max_tokens = tokenLimit;
-    }
-    if (enabled(body.model.supports_json)) requestBody.response_format = { type: "json_object" };
-    if (policy.nativeSeed !== null) requestBody.seed = policy.nativeSeed;
+    const requestBody = buildChatRequest(body.model, policy.prompt, task, policy.nativeSeed);
 
     const response = await fetch(safeEndpoint(body.model.base_url), {
       method: "POST",
@@ -119,8 +49,8 @@ h must be 0-360; s and l must be 0-100. Do not add markdown or commentary.`;
 
     const rawResponse = payload.choices?.[0]?.message?.content || "";
     if (!rawResponse) return Response.json({ ok: false, message: "模型响应中没有可读取的回答内容。" }, { status: 400 });
-    const colorResult = task === "word" ? parseModelJson(rawResponse) : null;
-    const associationResult = task === "color" ? parseAssociations(rawResponse) : null;
+    const colorResult = task === "word" ? parseColorResponse(rawResponse, "Interest") : null;
+    const associationResult = task === "color" ? parseAssociationResponse(rawResponse) : null;
     const latencyMs = Date.now() - started;
     const createdAt = new Date().toISOString();
     const result = {
@@ -131,7 +61,7 @@ h must be 0-360; s and l must be 0-100. Do not add markdown or commentary.`;
       task_type: task === "word" ? "Word to Color" : "Color to Emotion",
       run_index: 0,
       stimulus_id: task === "word" ? "Interest" : "J0",
-      clean_json: JSON.stringify(task === "word" ? colorResult?.parsed : associationResult),
+      clean_json: JSON.stringify(task === "word" ? colorResult : associationResult),
       raw_response: rawResponse,
       validation_status: "Valid",
       retry_count: 0,

@@ -36,6 +36,13 @@
       "when": 1784867855920,
       "tag": "0004_upgrade_gpt56",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784883971248,
+      "tag": "0005_orange_thor_girl",
+      "breakpoints": true
     }
   ]
 }

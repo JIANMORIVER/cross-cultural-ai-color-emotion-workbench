@@ -34,9 +34,9 @@ export function experimentOrders(policy: OrderPolicy, runIndex: number) {
 export function buildWordToColorPrompt(emotion: string) {
   return `You are participating in an emotion-color association experiment.
 For the English emotion word "${emotion}", choose the single sRGB color you most intuitively associate with it.
-Return exactly one JSON object with the model's original color fields in this structure:
-{"h": 0, "s": 0, "l": 0, "hex": "#000000"}
-h must be 0-360; s and l must be 0-100. Do not add markdown or commentary.`;
+Return exactly one JSON object in this structure:
+{"hex":"#000000"}
+The value must be a six-digit sRGB HEX color. Do not add markdown or commentary.`;
 }
 
 export function buildColorToEmotionPrompt(colorId: string, hex: string, policy: OrderPolicy, runIndex: number, stimulusIndex: number) {
