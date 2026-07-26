@@ -12,7 +12,7 @@ export async function GET() {
     db.prepare("SELECT * FROM model_configs WHERE project_id = ? ORDER BY rowid").bind(PROJECT_ID).all(),
     db.prepare(`SELECT repetitions, run_word_to_color, run_color_to_emotion, concurrency,
       max_retry, timeout_seconds, save_raw, prompt_seed_enabled, prompt_seed_base,
-      native_seed_enabled, prompt_variants_enabled, model_scope, single_model_id,
+      native_seed_enabled, prompt_variants_enabled, model_scope, single_model_id, model_slot_ids,
       shuffle_emotion_order, shuffle_color_order, shuffle_emotion_options
       FROM experiment_settings WHERE project_id = ?`).bind(PROJECT_ID).first(),
     db.prepare(`SELECT trial_id, project_id, model_id, model_alias, task_type, run_index,

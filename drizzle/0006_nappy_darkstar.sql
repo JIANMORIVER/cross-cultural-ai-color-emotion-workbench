@@ -1,0 +1,1 @@
+ALTER TABLE `experiment_settings` ADD `model_slot_ids` text DEFAULT '["model-gpt"]' NOT NULL;

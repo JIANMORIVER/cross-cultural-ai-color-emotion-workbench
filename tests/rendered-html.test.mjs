@@ -112,7 +112,7 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
   assert.match(platform, /DeepSeek V4 Pro/);
   assert.match(platform, /试跑实验一/);
   assert.match(platform, /试跑实验二/);
-  assert.match(platform, /单模型模式不会检查、调用或要求其他模型/);
+  assert.match(platform, /加入并行实验组/);
   assert.match(pilotRoute, /INSERT INTO trial_results/);
   assert.match(pilotRoute, /buildChatRequest/);
   assert.match(runRoute, /buildChatRequest/);
@@ -125,6 +125,24 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
   assert.match(migration, /model_scope/);
   assert.match(migration, /single_model_id/);
   assert.match(modelMigration, /gpt-5\.6/);
+});
+
+test("supports up to four incremental model experiment slots with isolated results", async () => {
+  const [platform, workspaceRoute, exportSource, migration] = await Promise.all([
+    readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/workspace/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/export/source-export.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0006_nappy_darkstar.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(platform, /并行模型实验组/);
+  assert.match(platform, /slice\(0, 4\)/);
+  assert.match(platform, /启动新增 \{pendingCount\} 组/);
+  assert.match(platform, /activeRunGroupsRef/);
+  assert.match(platform, /launchedModelIdsRef/);
+  assert.match(platform, /每个模型按独立轮次保存/);
+  assert.match(workspaceRoute, /model_slot_ids/);
+  assert.match(exportSource, /并行模型组ID/);
+  assert.match(migration, /model_slot_ids/);
 });
 
 test("uses partial 1–5 emotion ratings and reproducible shuffled presentation orders", async () => {

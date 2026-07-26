@@ -37,8 +37,9 @@ export type ExportSettings = {
   prompt_seed_base: number;
   native_seed_enabled: number | boolean;
   prompt_variants_enabled: number | boolean;
-  model_scope: "all" | "single";
+  model_scope: "all" | "single" | "slots";
   single_model_id: string;
+  model_slot_ids: string;
   shuffle_emotion_order: number | boolean;
   shuffle_color_order: number | boolean;
   shuffle_emotion_options: number | boolean;
@@ -399,8 +400,9 @@ export function buildExperimentConditionRows(payload: ExportPayload): ExportShee
     "模型原生Seed": Boolean(payload.settings.native_seed_enabled),
     "模型声明支持Seed": Boolean(model.supports_seed),
     "等价提示词轮换": Boolean(payload.settings.prompt_variants_enabled),
-    "运行模型范围": payload.settings.model_scope === "single" ? "单模型" : "全部已启用模型",
+    "运行模型范围": payload.settings.model_scope === "slots" ? "并行独立模型组" : payload.settings.model_scope === "single" ? "单模型" : "全部已启用模型",
     "单模型ID": payload.settings.model_scope === "single" ? payload.settings.single_model_id : "",
+    "并行模型组ID": payload.settings.model_scope === "slots" ? payload.settings.model_slot_ids : "",
     "实验一情绪询问乱序": Boolean(payload.settings.shuffle_emotion_order),
     "实验二颜色询问乱序": Boolean(payload.settings.shuffle_color_order),
     "实验二情绪选项乱序": Boolean(payload.settings.shuffle_emotion_options),
@@ -434,6 +436,7 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
       { "配置项": "运行词选色", "值": Boolean(payload.settings.run_word_to_color) },
       { "配置项": "运行色选词", "值": Boolean(payload.settings.run_color_to_emotion) },
       { "配置项": "并发数", "值": payload.settings.concurrency },
+      { "配置项": "并行模型组ID", "值": payload.settings.model_slot_ids || "" },
       { "配置项": "最大重试", "值": payload.settings.max_retry },
       { "配置项": "超时（秒）", "值": payload.settings.timeout_seconds },
       { "配置项": "提示词随机种子", "值": Boolean(payload.settings.prompt_seed_enabled) },

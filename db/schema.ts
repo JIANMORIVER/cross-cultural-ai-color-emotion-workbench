@@ -47,6 +47,7 @@ export const experimentSettings = sqliteTable("experiment_settings", {
   promptVariantsEnabled: integer("prompt_variants_enabled", { mode: "boolean" }).notNull().default(false),
   modelScope: text("model_scope").notNull().default("all"),
   singleModelId: text("single_model_id").notNull().default("model-gpt"),
+  modelSlotIds: text("model_slot_ids").notNull().default('["model-gpt"]'),
   shuffleEmotionOrder: integer("shuffle_emotion_order", { mode: "boolean" }).notNull().default(true),
   shuffleColorOrder: integer("shuffle_color_order", { mode: "boolean" }).notNull().default(true),
   shuffleEmotionOptions: integer("shuffle_emotion_options", { mode: "boolean" }).notNull().default(true),

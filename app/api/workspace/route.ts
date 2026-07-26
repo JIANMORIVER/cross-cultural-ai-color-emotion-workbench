@@ -31,6 +31,7 @@ async function ensureSchema() {
       prompt_variants_enabled INTEGER NOT NULL DEFAULT 0,
       model_scope TEXT NOT NULL DEFAULT 'all',
       single_model_id TEXT NOT NULL DEFAULT 'model-gpt',
+      model_slot_ids TEXT NOT NULL DEFAULT '["model-gpt"]',
       shuffle_emotion_order INTEGER NOT NULL DEFAULT 1,
       shuffle_color_order INTEGER NOT NULL DEFAULT 1,
       shuffle_emotion_options INTEGER NOT NULL DEFAULT 1
@@ -63,6 +64,7 @@ async function ensureSchema() {
     ["prompt_variants_enabled", "ALTER TABLE experiment_settings ADD COLUMN prompt_variants_enabled INTEGER NOT NULL DEFAULT 0"],
     ["model_scope", "ALTER TABLE experiment_settings ADD COLUMN model_scope TEXT NOT NULL DEFAULT 'all'"],
     ["single_model_id", "ALTER TABLE experiment_settings ADD COLUMN single_model_id TEXT NOT NULL DEFAULT 'model-gpt'"],
+    ["model_slot_ids", `ALTER TABLE experiment_settings ADD COLUMN model_slot_ids TEXT NOT NULL DEFAULT '["model-gpt"]'`],
     ["shuffle_emotion_order", "ALTER TABLE experiment_settings ADD COLUMN shuffle_emotion_order INTEGER NOT NULL DEFAULT 1"],
     ["shuffle_color_order", "ALTER TABLE experiment_settings ADD COLUMN shuffle_color_order INTEGER NOT NULL DEFAULT 1"],
     ["shuffle_emotion_options", "ALTER TABLE experiment_settings ADD COLUMN shuffle_emotion_options INTEGER NOT NULL DEFAULT 1"],
@@ -79,9 +81,9 @@ async function ensureSchema() {
         project_id, repetitions, run_word_to_color, run_color_to_emotion, concurrency,
         max_retry, timeout_seconds, save_raw, prompt_seed_enabled, prompt_seed_base,
         native_seed_enabled, prompt_variants_enabled, model_scope, single_model_id,
-        shuffle_emotion_order, shuffle_color_order, shuffle_emotion_options
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(PROJECT_ID, 100, 1, 1, 2, 3, 60, 1, 0, 20260715, 0, 0, "all", "model-gpt", 1, 1, 1),
+        model_slot_ids, shuffle_emotion_order, shuffle_color_order, shuffle_emotion_options
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(PROJECT_ID, 100, 1, 1, 2, 3, 60, 1, 0, 20260715, 0, 0, "all", "model-gpt", '["model-gpt"]', 1, 1, 1),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-5.6", "https://api.openai.com/v1", "OpenAI Chat Completions", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -171,10 +173,13 @@ export async function POST(request: Request) {
       .bind(data.repetitions, data.run_word_to_color ? 1 : 0, data.run_color_to_emotion ? 1 : 0,
         data.concurrency, data.max_retry, data.timeout_seconds, data.save_raw ? 1 : 0, PROJECT_ID).run();
     await db.prepare(`UPDATE experiment_settings SET prompt_seed_enabled=?, prompt_seed_base=?,
-      native_seed_enabled=?, prompt_variants_enabled=?, model_scope=?, single_model_id=? WHERE project_id=?`)
+      native_seed_enabled=?, prompt_variants_enabled=?, model_scope=?, single_model_id=?,
+      model_slot_ids=? WHERE project_id=?`)
       .bind(data.prompt_seed_enabled ? 1 : 0, data.prompt_seed_base,
         data.native_seed_enabled ? 1 : 0, data.prompt_variants_enabled ? 1 : 0,
-        data.model_scope === "single" ? "single" : "all", data.single_model_id || "model-gpt", PROJECT_ID).run();
+        ["single", "slots"].includes(String(data.model_scope)) ? data.model_scope : "all",
+        data.single_model_id || "model-gpt", typeof data.model_slot_ids === "string" ? data.model_slot_ids : '["model-gpt"]',
+        PROJECT_ID).run();
     await db.prepare(`UPDATE experiment_settings SET shuffle_emotion_order=?, shuffle_color_order=?,
       shuffle_emotion_options=? WHERE project_id=?`)
       .bind(data.shuffle_emotion_order ? 1 : 0, data.shuffle_color_order ? 1 : 0,

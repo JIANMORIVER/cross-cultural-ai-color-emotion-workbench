@@ -34,7 +34,7 @@ type Settings = {
   concurrency: number; max_retry: number; timeout_seconds: number; save_raw: number | boolean;
   prompt_seed_enabled: number | boolean; prompt_seed_base: number;
   native_seed_enabled: number | boolean; prompt_variants_enabled: number | boolean;
-  model_scope: "all" | "single"; single_model_id: string;
+  model_scope: "all" | "single" | "slots"; single_model_id: string; model_slot_ids: string;
   shuffle_emotion_order: number | boolean; shuffle_color_order: number | boolean;
   shuffle_emotion_options: number | boolean;
 };
@@ -136,7 +136,7 @@ const defaultSettings: Settings = {
   concurrency: 2, max_retry: 3, timeout_seconds: 60, save_raw: true,
   prompt_seed_enabled: false, prompt_seed_base: 20260715,
   native_seed_enabled: false, prompt_variants_enabled: false,
-  model_scope: "all", single_model_id: "model-gpt",
+  model_scope: "all", single_model_id: "model-gpt", model_slot_ids: '["model-gpt"]',
   shuffle_emotion_order: true, shuffle_color_order: true, shuffle_emotion_options: true,
 };
 
@@ -177,6 +177,18 @@ function bool(value: number | boolean) { return value === true || value === 1; }
 function number(value: number | string) { return typeof value === "number" ? value : Number(value); }
 function runGroupKey(modelId: string, runIndex: number) { return `${modelId}::${runIndex}`; }
 function isCompleteRunGroup(group: RunGroupSummary) { return Number(group.word_count) === 20 && Number(group.color_count) === 11; }
+function modelSlotIds(settings: Settings, models: Model[]) {
+  if (settings.model_scope === "single") return [settings.single_model_id].filter(Boolean);
+  if (settings.model_scope === "slots") {
+    try {
+      const parsed = JSON.parse(settings.model_slot_ids || "[]");
+      if (Array.isArray(parsed)) return [...new Set(parsed.map(String))].filter(id => models.some(model => model.id === id)).slice(0, 4);
+    } catch {
+      return [];
+    }
+  }
+  return models.filter(model => bool(model.enabled)).slice(0, 4).map(model => model.id);
+}
 
 function restoreSessionKeys() {
   if (typeof window === "undefined") return {};
@@ -199,8 +211,8 @@ function Logo() {
   return <div className="brand"><span className="brand-mark"><i /><i /><i /></span><span>CHROMA<em>LAB</em></span></div>;
 }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return <button type="button" className={`toggle ${checked ? "on" : ""}`} onClick={() => onChange(!checked)} aria-pressed={checked} aria-label={label}><span /></button>;
+function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
+  return <button type="button" className={`toggle ${checked ? "on" : ""}`} onClick={() => onChange(!checked)} aria-pressed={checked} aria-label={label} disabled={disabled}><span /></button>;
 }
 
 function Pill({ children, tone = "neutral" }: { children: React.ReactNode; tone?: string }) {
@@ -221,6 +233,10 @@ export function ExperimentPlatform() {
   const [pilotTesting, setPilotTesting] = useState<"" | "word" | "color">("");
   const [runnerState, setRunnerState] = useState<RunnerState>("idle");
   const runnerStateRef = useRef<RunnerState>("idle");
+  const activeRunGroupsRef = useRef(0);
+  const launchedModelIdsRef = useRef<Set<string>>(new Set());
+  const startingModelIdsRef = useRef<Set<string>>(new Set());
+  const [launchedModelIds, setLaunchedModelIds] = useState<string[]>([]);
   const [runStats, setRunStats] = useState<RunStats>({ completed: 0, valid: 0, failed: 0, retries: 0, latencyTotal: 0, active: 0 });
   const [modelRunProgress, setModelRunProgress] = useState<ModelRunProgress>({});
   const [lastRunError, setLastRunError] = useState("");
@@ -253,10 +269,9 @@ export function ExperimentPlatform() {
   }, [page]);
 
   const selectedModel = models.find(m => m.id === selectedModelId) || models[0];
-  const enabledModels = models.filter(m => bool(m.enabled));
-  const runModels = settings.model_scope === "single"
-    ? models.filter(model => model.id === settings.single_model_id)
-    : enabledModels;
+  const selectedRunModelIds = modelSlotIds(settings, models);
+  const runModels = models.filter(model => selectedRunModelIds.includes(model.id)).slice(0, 4);
+  const pendingRunModels = runModels.filter(model => !launchedModelIds.includes(model.id));
   const wtcRequests = bool(settings.run_word_to_color) ? runModels.length * 20 * settings.repetitions : 0;
   const cteRequests = bool(settings.run_color_to_emotion) ? runModels.length * 11 * settings.repetitions : 0;
   const totalRequests = wtcRequests + cteRequests;
@@ -331,10 +346,23 @@ export function ExperimentPlatform() {
 
   function prepareSingleModel(modelId: string) {
     const model = models.find(item => item.id === modelId);
-    const next = { ...settings, model_scope: "single" as const, single_model_id: modelId, repetitions: 1 };
+    const currentIds = settings.model_scope === "all" ? [] : modelSlotIds(settings, models);
+    if (!currentIds.includes(modelId) && currentIds.length >= 4) {
+      setNotice("并行实验组最多 4 个。请先移除一个未运行的模型组，再添加新模型。");
+      return;
+    }
+    const nextIds = [...new Set([...currentIds, modelId])].slice(0, 4);
+    const next = {
+      ...settings,
+      model_scope: "slots" as const,
+      single_model_id: modelId,
+      model_slot_ids: JSON.stringify(nextIds),
+      repetitions: currentIds.length ? settings.repetitions : 1,
+      concurrency: Math.max(settings.concurrency, nextIds.length),
+    };
     setSettings(next);
     setPage("experiment");
-    persist("saveSettings", next as unknown as Record<string, unknown>, `已切换为 ${model?.alias || "当前模型"} 单模型 Pilot；其他模型无需配置 Key。`);
+    persist("saveSettings", next as unknown as Record<string, unknown>, `${model?.alias || "当前模型"} 已加入并行实验组（${nextIds.length}/4）；各模型结果会独立分组。`);
   }
 
   function setKey(value: string) {
@@ -355,19 +383,19 @@ export function ExperimentPlatform() {
     setRunActivity("");
   }
 
-  function createTrialQueue(firstRunIndex: number) {
+  function createTrialQueue(firstRunIndex: number, queueModels: Model[]) {
     const queue: QueueTrial[] = [];
     for (let offset = 0; offset < settings.repetitions; offset += 1) {
       const runIndex = firstRunIndex + offset;
       const orders = experimentOrders(settings, runIndex);
       if (bool(settings.run_word_to_color)) {
         orders.emotions.forEach((emotion, stimulusIndex) => {
-          runModels.forEach(model => queue.push({ model, task: "word", runIndex, stimulusId: emotion, stimulusIndex }));
+          queueModels.forEach(model => queue.push({ model, task: "word", runIndex, stimulusId: emotion, stimulusIndex }));
         });
       }
       if (bool(settings.run_color_to_emotion)) {
         orders.colors.forEach(([stimulusId, stimulusHex], stimulusIndex) => {
-          runModels.forEach(model => queue.push({ model, task: "color", runIndex, stimulusId, stimulusHex, stimulusIndex }));
+          queueModels.forEach(model => queue.push({ model, task: "color", runIndex, stimulusId, stimulusHex, stimulusIndex }));
         });
       }
     }
@@ -375,17 +403,38 @@ export function ExperimentPlatform() {
   }
 
   function buildQueue() {
+    if (runnerStateRef.current === "running") {
+      setPage("runner");
+      persist("saveSettings", settings as unknown as Record<string, unknown>, pendingRunModels.length
+        ? `已新增 ${pendingRunModels.length} 个待启动模型组；点击“启动新增组”即可加入当前并行运行。`
+        : "当前选择的模型组都已在本轮运行中。");
+      return;
+    }
     resetRunProgress();
+    launchedModelIdsRef.current = new Set();
+    setLaunchedModelIds([]);
     changeRunnerState("ready"); setPage("runner");
     persist("saveSettings", settings as unknown as Record<string, unknown>, `已准备 ${totalRequests.toLocaleString()} 个试次。`);
   }
 
   async function startRun() {
-    if (!runModels.length || !totalRequests) { setNotice("请先选择至少一个模型和一个实验任务，再生成队列。"); return; }
-    const missing = runModels.filter(m => !keys[m.id]);
-    if (missing.length) { setNotice(`开始前请为 ${missing.map(m => m.alias).join("、")} 添加临时 API Key。`); return; }
+    const joining = runnerStateRef.current === "running";
+    const candidateModels = runModels.filter(model =>
+      !startingModelIdsRef.current.has(model.id) && (!joining || !launchedModelIdsRef.current.has(model.id)));
+    if (!candidateModels.length || !totalRequests) {
+      setNotice(joining ? "没有新的模型组可加入；请先在实验设计页添加一个未运行模型。" : "请先选择至少一个模型和一个实验任务，再生成队列。");
+      return;
+    }
+    candidateModels.forEach(model => startingModelIdsRef.current.add(model.id));
+    const releaseStarting = () => candidateModels.forEach(model => startingModelIdsRef.current.delete(model.id));
+    const missing = candidateModels.filter(m => !keys[m.id]);
+    if (missing.length) {
+      releaseStarting();
+      setNotice(`开始前请为 ${missing.map(m => m.alias).join("、")} 添加临时 API Key。`);
+      return;
+    }
     setNotice("正在执行正式运行前检查：连接、任务一格式、任务二格式…");
-    for (const model of runModels) {
+    for (const model of candidateModels) {
       try {
         const preflightResponse = await fetch("/api/model-test", {
           method: "POST",
@@ -394,10 +443,12 @@ export function ExperimentPlatform() {
         });
         const preflight = await preflightResponse.json().catch(() => ({})) as { ok?: boolean; message?: string };
         if (!preflightResponse.ok || !preflight.ok) {
+          releaseStarting();
           setNotice(`${model.alias} 未通过运行前检查：${preflight.message || `HTTP ${preflightResponse.status}`}。队列未启动，避免产生整批失败。`);
           return;
         }
       } catch (error) {
+        releaseStarting();
         setNotice(`${model.alias} 运行前检查未完成：${error instanceof Error ? error.message : "网络异常"}。队列未启动。`);
         return;
       }
@@ -409,16 +460,35 @@ export function ExperimentPlatform() {
       const sequenceData = await sequenceResponse.json() as { nextRunIndex?: number };
       firstRunIndex = Math.max(1, Number(sequenceData.nextRunIndex) || 1);
     } catch {
+      releaseStarting();
       setNotice("无法取得新的实验轮次编号。为避免覆盖旧数据，本次实验尚未开始。");
       return;
     }
-    const queue = createTrialQueue(firstRunIndex);
-    if (!queue.length) { setNotice("当前设置没有生成可执行试次。"); return; }
+    const queue = createTrialQueue(firstRunIndex, candidateModels);
+    if (!queue.length) {
+      releaseStarting();
+      setNotice("当前设置没有生成可执行试次。");
+      return;
+    }
 
-    resetRunProgress();
+    if (!joining) {
+      resetRunProgress();
+      launchedModelIdsRef.current = new Set();
+      setLaunchedModelIds([]);
+      activeRunGroupsRef.current = 0;
+    } else {
+      setModelRunProgress(current => ({
+        ...current,
+        ...Object.fromEntries(candidateModels.filter(model => !current[model.id]).map(model => [model.id, { completed: 0, valid: 0, word: 0, color: 0 }])),
+      }));
+    }
+    releaseStarting();
+    candidateModels.forEach(model => launchedModelIdsRef.current.add(model.id));
+    setLaunchedModelIds([...launchedModelIdsRef.current]);
+    activeRunGroupsRef.current += 1;
     changeRunnerState("running");
     setProject(current => ({ ...current, status: "Running" }));
-    persist("setStatus", { status: "Running" }, `实验已开始，本批数据使用第 ${firstRunIndex}–${firstRunIndex + settings.repetitions - 1} 轮；请求运行期间请保持页面打开。`);
+    persist("setStatus", { status: "Running" }, `${candidateModels.map(model => model.alias).join("、")} ${joining ? "已加入当前并行运行" : "实验已开始"}；数据使用第 ${firstRunIndex}–${firstRunIndex + settings.repetitions - 1} 轮并按模型独立保存。`);
 
     let cursor = 0;
     let limiter = Promise.resolve();
@@ -517,9 +587,10 @@ export function ExperimentPlatform() {
       }
     }
 
-    const workerCount = Math.min(queue.length, Math.max(1, settings.concurrency));
+    const workerCount = Math.min(queue.length, Math.max(1, Math.min(4, settings.concurrency, candidateModels.length)));
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    if (runnerStateRef.current === "running") {
+    activeRunGroupsRef.current = Math.max(0, activeRunGroupsRef.current - 1);
+    if (runnerStateRef.current === "running" && activeRunGroupsRef.current === 0) {
       changeRunnerState("completed");
       setRunActivity("");
       setProject(current => ({ ...current, status: "Completed" }));
@@ -675,8 +746,8 @@ export function ExperimentPlatform() {
         <div className="page-body">
           {page === "setup" && <SetupPage project={project} setProject={setProject} save={() => persist("saveProject", project as unknown as Record<string, unknown>, "项目详情已保存。")} />}
           {page === "models" && <ModelsPage models={models} selected={selectedModel} select={setSelectedModelId} patch={patchModel} save={saveModel} apiKey={keys[selectedModel.id] || ""} setKey={setKey} testing={testing} test={testConnection} pilotTesting={pilotTesting} pilotTest={pilotTest} prepareSingle={() => prepareSingleModel(selectedModel.id)} />}
-          {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
-          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} keys={keys} lastError={lastRunError} activity={runActivity} />}
+          {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} launchedModelIds={launchedModelIds} running={runnerState === "running"} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
+          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} pendingCount={pendingRunModels.length} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} lastError={lastRunError} activity={runActivity} />}
           {page === "review" && <ReviewPage results={filteredResults} failures={recentFailures} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
           {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} includeIncomplete={includeIncompleteExports} setIncludeIncomplete={setIncludeIncompleteExports} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
           {page === "analysis" && <AnalysisPlatform />}
@@ -763,15 +834,30 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
           <label>每分钟请求上限<input type="number" value={selected.rate_limit} onChange={e => patch({ rate_limit: number(e.target.value) })} /></label>
         </div>
         <div className="capabilities"><label><input type="checkbox" checked={bool(selected.supports_json)} onChange={e => patch({ supports_json: e.target.checked })} /> JSON 模式</label><label><input type="checkbox" checked={bool(selected.supports_seed)} onChange={e => patch({ supports_seed: e.target.checked })} /> 支持 Seed</label><span>API 格式：{selected.api_format}</span></div>
-        <div className="pilot-callout"><div><span className="eyebrow">只测当前模型</span><b>分别验证两个实验任务</b><p>实验一试跑 Interest → Color；实验二试跑 J0 → 可选 1–20 个情绪、每项 1–5 级。两次都会真实请求并保存结果。</p></div><div><button className="secondary" onClick={() => pilotTest("word")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "word" ? "实验一试跑中…" : "试跑实验一"}</button><button className="secondary" onClick={() => pilotTest("color")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "color" ? "实验二试跑中…" : "试跑实验二"}</button><button className="primary" onClick={prepareSingle}>设置为单模型 Pilot <span>→</span></button></div></div>
+        <div className="pilot-callout"><div><span className="eyebrow">当前模型实验组</span><b>先验证，再加入并行队列</b><p>可逐个把 DeepSeek、GPT、Doubao、Gemini 加入实验设计，最多 4 组同时运行；结果按模型与轮次独立保存。</p></div><div><button className="secondary" onClick={() => pilotTest("word")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "word" ? "实验一试跑中…" : "试跑实验一"}</button><button className="secondary" onClick={() => pilotTest("color")} disabled={Boolean(pilotTesting) || testing}>{pilotTesting === "color" ? "实验二试跑中…" : "试跑实验二"}</button><button className="primary" onClick={prepareSingle}>加入并行实验组 <span>→</span></button></div></div>
         <div className="detail-actions"><button className="secondary" onClick={test} disabled={testing || Boolean(pilotTesting)}>{testing ? "验证中…" : "验证连接与两项格式"}</button><button className="primary" onClick={save}>保存配置</button>{selected.latency_ms ? <span className="latency">最近延迟 <b>{selected.latency_ms} ms</b></span> : null}</div>
       </section>
     </div>
   </>;
 }
 
-function ExperimentPage({ settings, setSettings, models, activeModels, wtc, cte, total, build }: { settings: Settings; setSettings: (s: Settings) => void; models: Model[]; activeModels: Model[]; wtc: number; cte: number; total: number; build: () => void }) {
+function ExperimentPage({ settings, setSettings, models, activeModels, launchedModelIds, running, wtc, cte, total, build }: { settings: Settings; setSettings: (s: Settings) => void; models: Model[]; activeModels: Model[]; launchedModelIds: string[]; running: boolean; wtc: number; cte: number; total: number; build: () => void }) {
   const patch = (p: Partial<Settings>) => setSettings({ ...settings, ...p });
+  const slotIds = modelSlotIds(settings, models);
+  const setSlots = (ids: string[]) => patch({
+    model_scope: "slots",
+    model_slot_ids: JSON.stringify(ids.slice(0, 4)),
+    single_model_id: ids.at(-1) || settings.single_model_id,
+    concurrency: Math.max(1, Math.min(4, ids.length || 1)),
+  });
+  const addSlot = (modelId: string) => {
+    if (slotIds.includes(modelId) || slotIds.length >= 4) return;
+    setSlots([...slotIds, modelId]);
+  };
+  const removeSlot = (modelId: string) => {
+    if (running && launchedModelIds.includes(modelId)) return;
+    setSlots(slotIds.filter(id => id !== modelId));
+  };
   const completeGroupMode = bool(settings.run_word_to_color) && bool(settings.run_color_to_emotion);
   const completeGroups = completeGroupMode ? settings.repetitions * activeModels.length : 0;
   return <>
@@ -779,71 +865,74 @@ function ExperimentPage({ settings, setSettings, models, activeModels, wtc, cte,
     <div className="experiment-grid">
       <section className="task-column">
         <div className={`task-card ${bool(settings.run_word_to_color) ? "active" : ""}`}>
-          <div className="task-card-head"><span className="task-index">A</span><div><span className="eyebrow">任务一</span><h3>词选色 Word → Color</h3></div><Toggle checked={bool(settings.run_word_to_color)} onChange={v => patch({ run_word_to_color: v })} label="词选色" /></div>
+          <div className="task-card-head"><span className="task-index">A</span><div><span className="eyebrow">任务一</span><h3>词选色 Word → Color</h3></div><Toggle checked={bool(settings.run_word_to_color)} onChange={v => patch({ run_word_to_color: v })} label="词选色" disabled={running} /></div>
           <p>每次将一个英文情绪词放入独立上下文，模型返回一个最直觉相关的 sRGB HEX 颜色。</p>
           <pre><span>输入</span> “Admiration”{`\n`}<span>输出</span> {`{ "hex": "#6A5ACD" }`}</pre>
           <div className="task-math"><span>20 个情绪</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{wtc.toLocaleString()} 个请求</b></div>
         </div>
         <div className={`task-card ${bool(settings.run_color_to_emotion) ? "active" : ""}`}>
-          <div className="task-card-head"><span className="task-index">B</span><div><span className="eyebrow">任务二</span><h3>色选词 Color → Emotion</h3></div><Toggle checked={bool(settings.run_color_to_emotion)} onChange={v => patch({ run_color_to_emotion: v })} label="色选词" /></div>
+          <div className="task-card-head"><span className="task-index">B</span><div><span className="eyebrow">任务二</span><h3>色选词 Color → Emotion</h3></div><Toggle checked={bool(settings.run_color_to_emotion)} onChange={v => patch({ run_color_to_emotion: v })} label="色选词" disabled={running} /></div>
           <p>Prompt 提供匿名颜色 ID、HEX 与乱序情绪词表；模型可选择其中部分或全部情绪，并为每个已选情绪填写 1–5 共 5 级关联强度。</p>
           <pre><span>输入</span> C9 · #FFBC00 · 20 个乱序情绪{`\n`}<span>输出</span> {`{ "associations": [{ "emotion": "Joy", "intensity": 5 }] }`}</pre>
           <div className="task-math"><span>11 个颜色</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{cte.toLocaleString()} 个请求</b></div>
         </div>
       </section>
       <aside className="configuration-panel panel">
-        <div className="panel-head"><div><h3>采样配置</h3><p>统一应用于所有已启用模型。</p></div></div>
+        <div className="panel-head"><div><h3>采样配置</h3><p>先逐个添加模型组，再一起运行；运行中仍可追加未启动模型。</p></div></div>
         <div className="model-scope-control">
-          <div className="scope-head"><span className="eyebrow">本次调用范围</span><Pill tone={settings.model_scope === "single" ? "blue" : "neutral"}>{settings.model_scope === "single" ? "单模型" : `${activeModels.length} 个模型`}</Pill></div>
-          <div className="scope-buttons"><button type="button" className={settings.model_scope === "single" ? "active" : ""} onClick={() => patch({ model_scope: "single", single_model_id: settings.single_model_id || models[0]?.id || "" })}><b>单模型 Pilot</b><small>只需要该模型的 Key</small></button><button type="button" className={settings.model_scope === "all" ? "active" : ""} onClick={() => patch({ model_scope: "all" })}><b>全部已启用模型</b><small>用于正式跨模型实验</small></button></div>
-          {settings.model_scope === "single" ? <label>选择本次模型<select value={settings.single_model_id} onChange={e => patch({ single_model_id: e.target.value })}>{models.map(model => <option key={model.id} value={model.id}>{model.alias} · {model.model_id}</option>)}</select></label> : null}
-          <small className="scope-note">单模型模式不会检查、调用或要求其他模型的 API Key。</small>
+          <div className="scope-head"><span className="eyebrow">并行模型实验组</span><Pill tone="blue">{activeModels.length} / 4 组</Pill></div>
+          <div className="experiment-slot-list">{activeModels.map((model, index) => {
+            const launched = launchedModelIds.includes(model.id);
+            return <div className={`experiment-slot ${launched ? "launched" : ""}`} key={model.id}><span>{String(index + 1).padStart(2, "0")}</span><div><b>{model.alias}</b><small>{model.model_id} · {launched ? "正在运行或已加入" : "待启动"}</small></div><Pill tone={launched ? "green" : "neutral"}>{launched ? "已隔离运行" : "待运行"}</Pill><button type="button" disabled={running && launched} onClick={() => removeSlot(model.id)} aria-label={`移除 ${model.alias}`}>×</button></div>;
+          })}</div>
+          {activeModels.length < 4 ? <label>增加一个单模型实验组<select value="" onChange={e => { if (e.target.value) addSlot(e.target.value); }}><option value="">选择模型加入（最多 4 组）</option>{models.filter(model => !slotIds.includes(model.id)).map(model => <option key={model.id} value={model.id}>{model.alias} · {model.model_id}</option>)}</select></label> : null}
+          <small className="scope-note">{running ? "已运行的模型组已锁定；仍可添加新的模型组，返回运行页后点击“启动新增组”。" : "每个模型拥有独立进度、轮次记录、失败日志和导出分组；同一模型不会重复加入。"}</small>
         </div>
-        <label className="range-label"><span>每个模型的完整实验轮次<b>{settings.repetitions} 组</b></span><input type="range" min="1" max="100" value={settings.repetitions} onChange={e => patch({ repetitions: number(e.target.value) })} /><small><span>1 组测试数据</span><span>100 组正式数据</span></small></label>
-        <div className="repetition-presets"><span>快速设置</span>{[1, 10, 50, 100].map(value => <button type="button" key={value} className={settings.repetitions === value ? "active" : ""} onClick={() => patch({ repetitions: value })}>{value} 组</button>)}</div>
-        <div className="compact-fields"><label>全局并发数<input type="number" min="1" max="10" value={settings.concurrency} onChange={e => patch({ concurrency: number(e.target.value) })} /></label><label>最大重试次数<input type="number" min="0" max="5" value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" value={settings.timeout_seconds} onChange={e => patch({ timeout_seconds: number(e.target.value) })} /></label></div>
+        <label className="range-label"><span>每个模型的完整实验轮次<b>{settings.repetitions} 组</b></span><input type="range" min="1" max="100" value={settings.repetitions} disabled={running} onChange={e => patch({ repetitions: number(e.target.value) })} /><small><span>1 组测试数据</span><span>100 组正式数据</span></small></label>
+        <div className="repetition-presets"><span>快速设置</span>{[1, 10, 50, 100].map(value => <button type="button" key={value} disabled={running} className={settings.repetitions === value ? "active" : ""} onClick={() => patch({ repetitions: value })}>{value} 组</button>)}</div>
+        <div className="compact-fields"><label>并行模型组<input type="number" readOnly value={activeModels.length} /></label><label>最大重试次数<input type="number" min="0" max="5" disabled={running} value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" disabled={running} value={settings.timeout_seconds} onChange={e => patch({ timeout_seconds: number(e.target.value) })} /></label></div>
         <div className="order-controls">
           <div className="strategy-title"><div><span className="eyebrow">呈现顺序</span><b>可复现乱序</b></div><small>按基础 Seed 确定每轮顺序</small></div>
-          <div className={bool(settings.shuffle_emotion_order) ? "order-row active" : "order-row"}><span>实验一</span><div><b>20 个情绪询问顺序乱序</b><small>每轮以不同顺序逐个询问情绪词，降低固定位置偏差。</small></div><Toggle checked={bool(settings.shuffle_emotion_order)} onChange={v => patch({ shuffle_emotion_order: v })} label="实验一情绪顺序乱序" /></div>
-          <div className={bool(settings.shuffle_color_order) ? "order-row active" : "order-row"}><span>实验二</span><div><b>11 个颜色询问顺序乱序</b><small>每轮以不同顺序逐个询问匿名颜色。</small></div><Toggle checked={bool(settings.shuffle_color_order)} onChange={v => patch({ shuffle_color_order: v })} label="实验二颜色顺序乱序" /></div>
-          <div className={bool(settings.shuffle_emotion_options) ? "order-row active" : "order-row"}><span>Prompt</span><div><b>实验二的 20 个情绪选项乱序</b><small>每个颜色 Prompt 内的情绪词顺序也独立乱序；顺序本身不代表强度。</small></div><Toggle checked={bool(settings.shuffle_emotion_options)} onChange={v => patch({ shuffle_emotion_options: v })} label="实验二情绪选项乱序" /></div>
+          <div className={bool(settings.shuffle_emotion_order) ? "order-row active" : "order-row"}><span>实验一</span><div><b>20 个情绪询问顺序乱序</b><small>每轮以不同顺序逐个询问情绪词，降低固定位置偏差。</small></div><Toggle checked={bool(settings.shuffle_emotion_order)} onChange={v => patch({ shuffle_emotion_order: v })} label="实验一情绪顺序乱序" disabled={running} /></div>
+          <div className={bool(settings.shuffle_color_order) ? "order-row active" : "order-row"}><span>实验二</span><div><b>11 个颜色询问顺序乱序</b><small>每轮以不同顺序逐个询问匿名颜色。</small></div><Toggle checked={bool(settings.shuffle_color_order)} onChange={v => patch({ shuffle_color_order: v })} label="实验二颜色顺序乱序" disabled={running} /></div>
+          <div className={bool(settings.shuffle_emotion_options) ? "order-row active" : "order-row"}><span>Prompt</span><div><b>实验二的 20 个情绪选项乱序</b><small>每个颜色 Prompt 内的情绪词顺序也独立乱序；顺序本身不代表强度。</small></div><Toggle checked={bool(settings.shuffle_emotion_options)} onChange={v => patch({ shuffle_emotion_options: v })} label="实验二情绪选项乱序" disabled={running} /></div>
         </div>
         <div className="randomness-strategies">
           <div className="strategy-title"><div><span className="eyebrow">随机性方案</span><b>按实验统一启用</b></div><small>每项均可独立关闭</small></div>
           <div className={bool(settings.prompt_seed_enabled) ? "strategy-row active" : "strategy-row"}>
-            <span>A</span><div><b>提示词随机种子</b><small>在 Prompt 末尾附加可复现的 Seed 标签。</small>{bool(settings.prompt_seed_enabled) ? <label>基础 Seed<input type="number" value={settings.prompt_seed_base} onChange={e => patch({ prompt_seed_base: number(e.target.value) })} /></label> : null}</div><Toggle checked={bool(settings.prompt_seed_enabled)} onChange={v => patch({ prompt_seed_enabled: v })} label="提示词随机种子" />
+            <span>A</span><div><b>提示词随机种子</b><small>在 Prompt 末尾附加可复现的 Seed 标签。</small>{bool(settings.prompt_seed_enabled) ? <label>基础 Seed<input type="number" disabled={running} value={settings.prompt_seed_base} onChange={e => patch({ prompt_seed_base: number(e.target.value) })} /></label> : null}</div><Toggle checked={bool(settings.prompt_seed_enabled)} onChange={v => patch({ prompt_seed_enabled: v })} label="提示词随机种子" disabled={running} />
           </div>
           <div className={bool(settings.native_seed_enabled) ? "strategy-row active" : "strategy-row"}>
-            <span>B</span><div><b>模型原生 Seed</b><small>向支持 Seed 的接口发送同一试次种子；不支持时明确记录。</small><em>{activeModels.filter(model => bool(model.supports_seed)).length} / {activeModels.length} 个本次模型声明支持</em></div><Toggle checked={bool(settings.native_seed_enabled)} onChange={v => patch({ native_seed_enabled: v })} label="模型原生 Seed" />
+            <span>B</span><div><b>模型原生 Seed</b><small>向支持 Seed 的接口发送同一试次种子；不支持时明确记录。</small><em>{activeModels.filter(model => bool(model.supports_seed)).length} / {activeModels.length} 个本次模型声明支持</em></div><Toggle checked={bool(settings.native_seed_enabled)} onChange={v => patch({ native_seed_enabled: v })} label="模型原生 Seed" disabled={running} />
           </div>
           <div className={bool(settings.prompt_variants_enabled) ? "strategy-row active" : "strategy-row"}>
-            <span>C</span><div><b>等价提示词轮换</b><small>按 Seed 在 3 个语义等价的 JSON 指令间确定性轮换。</small></div><Toggle checked={bool(settings.prompt_variants_enabled)} onChange={v => patch({ prompt_variants_enabled: v })} label="等价提示词轮换" />
+            <span>C</span><div><b>等价提示词轮换</b><small>按 Seed 在 3 个语义等价的 JSON 指令间确定性轮换。</small></div><Toggle checked={bool(settings.prompt_variants_enabled)} onChange={v => patch({ prompt_variants_enabled: v })} label="等价提示词轮换" disabled={running} />
           </div>
         </div>
         <div className="locked-list"><span className="eyebrow">已锁定条件</span>{[["实验语言", "English"], ["文化角色设定", "无"], ["输入形式", "仅文本"], ["上下文", "相互独立"], ["原始响应", "保存"]].map(([a,b]) => <div key={a}><span>{a}</span><b>{b}</b><i>⌑</i></div>)}</div>
-        <div className="queue-summary"><span>预计完整数据组</span><strong>{completeGroups.toLocaleString()}</strong><p>{completeGroupMode ? `${settings.repetitions} 轮 × ${activeModels.length} 个模型；每组严格包含 20 个词选色 + 11 个色选词` : "只有同时启用实验一和实验二，才会形成可导出的完整数据组"}</p><div><span>每个完整组 31 个有效结果</span><span>合计 {total.toLocaleString()} 个 API 请求</span></div><div><span>{wtc.toLocaleString()} 词选色请求</span><span>{cte.toLocaleString()} 色选词请求</span></div></div>
-        <button className="primary full" disabled={!total} onClick={build}>{completeGroupMode ? `生成 ${completeGroups.toLocaleString()} 组完整数据` : "生成单任务队列（不计完整数据组）"} <span>→</span></button>
+        <div className="queue-summary"><span>预计独立数据组</span><strong>{completeGroups.toLocaleString()}</strong><p>{completeGroupMode ? `${settings.repetitions} 轮 × ${activeModels.length} 个模型实验组；每组严格包含 20 个词选色 + 11 个色选词` : "只有同时启用实验一和实验二，才会形成可导出的完整数据组"}</p><div><span>每个模型按独立轮次保存</span><span>合计 {total.toLocaleString()} 个 API 请求</span></div><div><span>{wtc.toLocaleString()} 词选色请求</span><span>{cte.toLocaleString()} 色选词请求</span></div></div>
+        <button className="primary full" disabled={!total} onClick={build}>{running ? "保存新增组并返回运行页" : completeGroupMode ? `生成 ${completeGroups.toLocaleString()} 组独立数据` : "生成单任务队列（不计完整数据组）"} <span>→</span></button>
       </aside>
     </div>
   </>;
 }
 
-function RunnerPage({ state, setState, start, total, stats, modelProgress, settings, models, keys, lastError, activity }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; keys: Record<string, string>; lastError: string; activity: string }) {
+function RunnerPage({ state, setState, start, pendingCount, total, stats, modelProgress, settings, models, launchedModelIds, keys, lastError, activity }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; pendingCount: number; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; launchedModelIds: string[]; keys: Record<string, string>; lastError: string; activity: string }) {
   const pct = total ? Math.min(100, stats.completed / total * 100) : 0;
   const wordTotal = bool(settings.run_word_to_color) ? settings.repetitions * 20 : 0;
   const colorTotal = bool(settings.run_color_to_emotion) ? settings.repetitions * 11 : 0;
   const averageLatency = stats.valid ? Math.round(stats.latencyTotal / stats.valid) : 0;
   const stateLabel = state === "running" ? "正在派发请求" : state === "paused" ? "队列已暂停" : state === "completed" ? "队列已完成" : "等待开始";
   return <>
-    <PageTitle index="04" title="运行试次队列" subtitle="监控任务吞吐与数据质量，不改变任何有效的重复答案。" action={<div className="runner-actions">{state === "running" ? <button className="secondary" onClick={() => setState("paused")}>Ⅱ 暂停</button> : <button className="primary" onClick={state === "paused" ? () => setState("running") : start}>{state === "paused" ? "恢复运行" : state === "completed" ? "重新运行" : "开始实验"}</button>}</div>} />
+    <PageTitle index="04" title="运行试次队列" subtitle="最多四个单模型实验组并行运行；进度、失败与结果按模型独立记录。" action={<div className="runner-actions">{state === "running" ? <><button className="secondary" onClick={() => setState("paused")}>Ⅱ 暂停全部</button>{pendingCount ? <button className="primary" onClick={start}>＋ 启动新增 {pendingCount} 组</button> : <button className="secondary" disabled>已运行 {launchedModelIds.length} / 4 组</button>}</> : <button className="primary" onClick={state === "paused" ? () => setState("running") : start}>{state === "paused" ? "恢复全部运行" : state === "completed" ? "重新运行所选组" : "开始并行实验"}</button>}</div>} />
     <section className="run-hero">
       <div className="run-number"><span>总体进度</span><strong>{stats.completed.toLocaleString()} <em>/ {total.toLocaleString()}</em></strong><div className="progress"><i style={{ width: `${pct}%` }} /></div><small>已完成 {pct.toFixed(1)}% · {stateLabel}{stats.active ? ` · ${stats.active} 个请求处理中` : ""}</small>{activity ? <small className="run-activity">当前：{activity}</small> : null}</div>
       <div className="run-metrics"><div><span>✓</span><p><b>{stats.valid.toLocaleString()}</b><small>有效</small></p></div><div><span>↻</span><p><b>{stats.retries.toLocaleString()}</b><small>已重试</small></p></div><div><span>×</span><p><b>{stats.failed.toLocaleString()}</b><small>失败</small></p></div><div><span>⏱</span><p><b>{averageLatency ? `${averageLatency} ms` : "—"}</b><small>平均延迟</small></p></div></div>
     </section>
     <div className="two-columns runner-grid">
       <section className="panel">
-        <div className="panel-head"><div><h3>模型进度</h3><p>每个服务提供商使用独立的限流通道。</p></div><Pill tone={state === "running" ? "blue" : "neutral"}>{state === "running" ? "运行中" : "待机"}</Pill></div>
-        <div className="model-progress-table"><div className="table-head"><span>模型</span><span>凭证</span><span>词选色</span><span>色选词</span><span>成功率</span></div>{models.map((m, i) => { const progress = modelProgress[m.id] || { completed: 0, valid: 0, word: 0, color: 0 }; return <div className="table-row" key={m.id}><span><i className={`model-glyph g${i}`}>{m.alias[0]}</i><b>{m.alias}</b></span><span><Pill tone={keys[m.id] ? "green" : "amber"}>{keys[m.id] ? "就绪" : "需要 Key"}</Pill></span><span>{progress.word} / {wordTotal || "—"}</span><span>{progress.color} / {colorTotal || "—"}</span><span>{progress.completed ? `${(progress.valid / progress.completed * 100).toFixed(1)}%` : "—"}</span></div>; })}</div>
+        <div className="panel-head"><div><h3>独立模型实验组</h3><p>每组拥有独立限流、进度和结果分区。</p></div><Pill tone={state === "running" ? "blue" : "neutral"}>{state === "running" ? `${launchedModelIds.length} 组运行中` : "待机"}</Pill></div>
+        <div className="model-progress-table"><div className="table-head"><span>实验组 / 模型</span><span>组状态</span><span>词选色</span><span>色选词</span><span>成功率</span></div>{models.map((m, i) => { const progress = modelProgress[m.id] || { completed: 0, valid: 0, word: 0, color: 0 }; const launched = launchedModelIds.includes(m.id); return <div className="table-row" key={m.id}><span><i className={`model-glyph g${i}`}>{i + 1}</i><b>{m.alias}</b></span><span><Pill tone={launched ? "green" : keys[m.id] ? "blue" : "amber"}>{launched ? "独立运行" : keys[m.id] ? "待启动" : "需要 Key"}</Pill></span><span>{progress.word} / {wordTotal || "—"}</span><span>{progress.color} / {colorTotal || "—"}</span><span>{progress.completed ? `${(progress.valid / progress.completed * 100).toFixed(1)}%` : "—"}</span></div>; })}</div>
       </section>
       <section className="panel activity-panel">
         <div className="panel-head"><div><h3>运行就绪检查</h3><p>首次产生费用前的预检查。</p></div></div>
