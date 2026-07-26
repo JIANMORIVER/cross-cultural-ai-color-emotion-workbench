@@ -23,7 +23,12 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   ]);
   assert.match(platform, /数据分析/);
   assert.match(analysis, /multiple/);
-  assert.match(analysis, /合并全部文件/);
+  assert.match(analysis, /实验组队列/);
+  assert.match(analysis, /合并已启用组/);
+  assert.match(analysis, /仅当前设置组/);
+  assert.match(analysis, /运行全部可用分析/);
+  assert.match(analysis, /analysis_manifest/);
+  assert.match(analysis, /导出全部结果 XLSX/);
   assert.match(analysis, /导出 CSV/);
   assert.match(analysis, /数据大屏/);
   assert.match(engine, /task1-cluster/);

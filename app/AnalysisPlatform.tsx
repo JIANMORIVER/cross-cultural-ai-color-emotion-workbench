@@ -25,9 +25,21 @@ import {
 } from "./analysis/engine";
 
 type SheetData = { name: string; rows: DataRow[]; columns: string[] };
+type ExperimentGroup = {
+  id: string;
+  label: string;
+  fileName: string;
+  sheets: SheetData[];
+  sheetName: string;
+  selectedColumns: string[];
+  rowStart: number;
+  rowEnd: number;
+  enabled: boolean;
+};
 type RunStatus = "idle" | "running" | "completed" | "error";
 type TaskRun = { status: RunStatus; result?: AnalysisResult; error?: string };
 type WorkspaceTab = "import" | "tasks" | "dashboard";
+type AnalysisScope = "combined" | "active";
 
 const TASKS = [
   { id: "task1-normalize", group: "实验一", title: "色彩格式标准化", description: "宽表转长表，并将 HEX、RGB、HSL、HSV 或 Lab 统一到五种标准色彩表示。", output: "标准长表" },
@@ -54,15 +66,28 @@ function resultFromRows(id: string, title: string, rows: ExportRow[], summary: A
   return { id, title, kind: "table", rows, summary, note };
 }
 
+function configuredRows(group?: ExperimentGroup) {
+  if (!group) return [];
+  const sheet = group.sheets.find(item => item.name === group.sheetName);
+  if (!sheet) return [];
+  return sheet.rows
+    .slice(Math.max(0, group.rowStart - 1), Math.min(sheet.rows.length, group.rowEnd))
+    .map(row => ({
+      ...Object.fromEntries(group.selectedColumns.map(column => [column, row[column]])),
+      _analysis_group: group.label,
+    }) as DataRow);
+}
+
+function safeFileName(value: string) {
+  return value.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-") || "analysis";
+}
+
 export function AnalysisPlatform() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [tab, setTab] = useState<WorkspaceTab>("import");
-  const [fileName, setFileName] = useState("");
-  const [sheets, setSheets] = useState<SheetData[]>([]);
-  const [sheetName, setSheetName] = useState("");
-  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
-  const [rowStart, setRowStart] = useState(1);
-  const [rowEnd, setRowEnd] = useState(1);
+  const [groups, setGroups] = useState<ExperimentGroup[]>([]);
+  const [activeGroupId, setActiveGroupId] = useState("");
+  const [analysisScope, setAnalysisScope] = useState<AnalysisScope>("combined");
   const [loadingFile, setLoadingFile] = useState(false);
   const [fileError, setFileError] = useState("");
   const [runs, setRuns] = useState<Record<string, TaskRun>>({});
@@ -72,11 +97,20 @@ export function AnalysisPlatform() {
   const [colorFilter, setColorFilter] = useState("全部颜色");
   const [metric, setMetric] = useState<"选择率" | "平均强度_全部">("选择率");
 
-  const sheet = sheets.find(item => item.name === sheetName);
+  const activeGroup = groups.find(group => group.id === activeGroupId) || groups[0];
+  const sheet = activeGroup?.sheets.find(item => item.name === activeGroup.sheetName);
+  const enabledGroups = groups.filter(group => group.enabled);
+  const analysisGroups = analysisScope === "combined" ? enabledGroups : activeGroup ? [activeGroup] : [];
+  const selectedColumns = useMemo(() => analysisGroups.length ? [...new Set(["_analysis_group", ...analysisGroups.flatMap(group => group.selectedColumns)])] : [], [analysisGroups]);
   const selectedRows = useMemo(() => {
-    if (!sheet) return [];
-    return sheet.rows.slice(Math.max(0, rowStart - 1), Math.min(sheet.rows.length, rowEnd)).map(row => Object.fromEntries(selectedColumns.map(column => [column, row[column]])) as DataRow);
-  }, [sheet, rowStart, rowEnd, selectedColumns]);
+    return analysisGroups.flatMap(group => configuredRows(group));
+  }, [analysisGroups]);
+  const activeRows = useMemo(() => configuredRows(activeGroup), [activeGroup]);
+  const fileName = groups.length
+    ? analysisScope === "combined"
+      ? `${enabledGroups.length}组实验_合并分析`
+      : activeGroup?.label || "单组分析"
+    : "";
   const detection = useMemo(() => detectDataset(selectedRows, selectedColumns), [selectedRows, selectedColumns]);
   const colorData = useMemo(() => parseColorRows(selectedRows, selectedColumns, detection.schema), [selectedRows, selectedColumns, detection.schema]);
   const gewData = useMemo(() => parseGewRows(selectedRows, selectedColumns), [selectedRows, selectedColumns]);
@@ -93,36 +127,87 @@ export function AnalysisPlatform() {
     if (!files.length) return;
     setLoadingFile(true); setFileError("");
     try {
-      const XLSX = await import("xlsx"); const parsed: SheetData[] = [];
+      const XLSX = await import("xlsx"); const incoming: ExperimentGroup[] = [];
       for (const file of files) {
         const buffer = await file.arrayBuffer();
         const workbook = file.name.toLowerCase().endsWith(".csv")
           ? XLSX.read(new TextDecoder("utf-8").decode(buffer), { type: "string", cellDates: true })
           : XLSX.read(buffer, { type: "array", cellDates: true });
+        const parsed: SheetData[] = [];
         workbook.SheetNames.forEach(name => {
           const rawRows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { defval: null, raw: true }) as DataRow[];
           const rows = rawRows.map(row => ({ _source_file: file.name.replace(/\.[^.]+$/, ""), ...row }));
           const columns = [...new Set(rows.flatMap(row => Object.keys(row)))];
-          parsed.push({ name: files.length > 1 ? `${file.name} · ${name}` : name, rows, columns });
+          if (rows.length) parsed.push({ name, rows, columns });
+        });
+        if (!parsed.length) continue;
+        const first = parsed[0];
+        incoming.push({
+          id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${incoming.length}`,
+          label: file.name.replace(/\.[^.]+$/, ""),
+          fileName: file.name,
+          sheets: parsed,
+          sheetName: first.name,
+          selectedColumns: first.columns,
+          rowStart: 1,
+          rowEnd: first.rows.length,
+          enabled: true,
         });
       }
-      if (!parsed.some(item => item.rows.length)) throw new Error("文件中没有可读取的数据行。");
-      const populated = parsed.filter(item => item.rows.length);
-      const mergedRows = populated.flatMap(item => item.rows); const mergedColumns = [...new Set(populated.flatMap(item => item.columns))];
-      const nextSheets = files.length > 1 ? [{ name: "合并全部文件", rows: mergedRows, columns: mergedColumns }, ...parsed] : parsed;
-      const first = nextSheets[0];
-      setFileName(files.length > 1 ? `${files.length} 个文件合并` : files[0].name); setSheets(nextSheets); setSheetName(first.name); setSelectedColumns(first.columns); setRowStart(1); setRowEnd(first.rows.length); setRuns({});
+      if (!incoming.length) throw new Error("所选文件中没有可读取的数据行。");
+      setGroups(current => [...current, ...incoming]);
+      setActiveGroupId(incoming[0].id);
+      setAnalysisScope(current => groups.length || incoming.length > 1 ? "combined" : current);
+      setRuns({});
     } catch (error) { setFileError(error instanceof Error ? error.message : "无法读取该文件，请检查格式。"); }
     finally { setLoadingFile(false); }
   }
 
-  function changeSheet(name: string) {
-    const next = sheets.find(item => item.name === name); if (!next) return;
-    setSheetName(name); setSelectedColumns(next.columns); setRowStart(1); setRowEnd(next.rows.length); setRuns({});
+  function updateGroup(id: string, update: (group: ExperimentGroup) => ExperimentGroup) {
+    setGroups(current => current.map(group => group.id === id ? update(group) : group));
+    setRuns({});
   }
 
-  function selectAllColumns() { setSelectedColumns(sheet?.columns || []); }
-  function toggleColumn(column: string) { setSelectedColumns(current => current.includes(column) ? current.filter(item => item !== column) : [...current, column]); }
+  function changeSheet(name: string) {
+    if (!activeGroup) return;
+    const next = activeGroup.sheets.find(item => item.name === name); if (!next) return;
+    updateGroup(activeGroup.id, group => ({ ...group, sheetName: name, selectedColumns: next.columns, rowStart: 1, rowEnd: next.rows.length }));
+  }
+
+  function removeGroup(id: string) {
+    setGroups(current => {
+      const next = current.filter(group => group.id !== id);
+      if (activeGroupId === id) setActiveGroupId(next[0]?.id || "");
+      return next;
+    });
+    setRuns({});
+  }
+
+  function duplicateGroup(id: string) {
+    const source = groups.find(group => group.id === id);
+    if (!source) return;
+    const duplicate = {
+      ...source,
+      id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-copy`,
+      label: `${source.label} · 副本`,
+    };
+    setGroups(current => [...current, duplicate]);
+    setActiveGroupId(duplicate.id);
+    setRuns({});
+  }
+
+  function clearGroups() {
+    setGroups([]); setActiveGroupId(""); setRuns({}); setFileError("");
+  }
+
+  function selectAllColumns() {
+    if (activeGroup && sheet) updateGroup(activeGroup.id, group => ({ ...group, selectedColumns: sheet.columns }));
+  }
+
+  function toggleColumn(column: string) {
+    if (!activeGroup) return;
+    updateGroup(activeGroup.id, group => ({ ...group, selectedColumns: group.selectedColumns.includes(column) ? group.selectedColumns.filter(item => item !== column) : [...group.selectedColumns, column] }));
+  }
 
   async function runTask(id: string) {
     setRuns(current => ({ ...current, [id]: { status: "running" } }));
@@ -156,6 +241,31 @@ export function AnalysisPlatform() {
   }
 
   function exportResult(result: AnalysisResult) { download(`${fileName.replace(/\.[^.]+$/, "") || "analysis"}_${result.id}.csv`, toCsv(result.rows)); }
+  async function exportAllResults() {
+    const completed = Object.values(runs).flatMap(run => run.result ? [run.result] : []);
+    if (!completed.length) return;
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.utils.book_new();
+    completed.forEach(result => XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(result.rows), result.id.slice(0, 31)));
+    const manifest = analysisGroups.map(group => {
+      const groupSheet = group.sheets.find(item => item.name === group.sheetName);
+      const groupDetection = detectDataset(configuredRows(group), group.selectedColumns);
+      return {
+        实验组: group.label,
+        文件: group.fileName,
+        工作表: group.sheetName,
+        起始行: group.rowStart,
+        结束行: group.rowEnd,
+        有效行数: configuredRows(group).length,
+        选中列数: group.selectedColumns.length,
+        数据结构: groupDetection.schemaLabel,
+        色彩格式: groupDetection.formats.join(" + "),
+        原始工作表行数: groupSheet?.rows.length || 0,
+      };
+    });
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(manifest), "analysis_manifest");
+    XLSX.writeFile(workbook, `${safeFileName(fileName)}_全部分析结果.xlsx`, { compression: true });
+  }
   function resetDashboardFilters(mode: "task1" | "task2") { setDashboardMode(mode); setSourceFilter("全部来源"); setEmotionFilter("全部情绪"); setColorFilter("全部颜色"); }
 
   const selectedTaskCount = TASKS.filter(task => taskAvailable(task.id)).length;
@@ -173,35 +283,56 @@ export function AnalysisPlatform() {
 
     {tab === "import" ? <section className="analysis-import-layout">
       <div className="analysis-main-column">
-        <section className={`analysis-dropzone ${fileName ? "loaded" : ""}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); void loadFiles(event.dataTransfer.files); }}>
-          <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" multiple onChange={event => void loadFiles(event.target.files || undefined)} />
-          <div className="drop-icon">{loadingFile ? "···" : fileName ? "✓" : "↑"}</div>
-          <div><span className="eyebrow">数据源</span><h2>{fileName || "上传实验数据"}</h2><p>{fileName ? `${sheets.length} 个工作表 · 当前 ${sheet?.rows.length || 0} 行 × ${sheet?.columns.length || 0} 列` : "可同时选择多个 CSV / XLS / XLSX 并自动合并；文件只在浏览器内读取。"}</p></div>
-          <button className="secondary" onClick={() => inputRef.current?.click()} disabled={loadingFile}>{fileName ? "替换文件" : "选择文件"}</button>
+        <section className={`analysis-dropzone ${groups.length ? "loaded" : ""}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); void loadFiles(event.dataTransfer.files); }}>
+          <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" multiple onChange={event => { void loadFiles(event.target.files || undefined); event.currentTarget.value = ""; }} />
+          <div className="drop-icon">{loadingFile ? "···" : groups.length ? "+" : "↑"}</div>
+          <div><span className="eyebrow">批量数据源</span><h2>{groups.length ? `已导入 ${groups.length} 组实验` : "一次上传多组实验数据"}</h2><p>{groups.length ? "可继续追加文件；每组独立保存工作表、行范围与字段列，不会覆盖前面的配置。" : "支持同时选择或拖入多个 CSV / XLS / XLSX；每个文件建立一组独立分析配置。"}</p></div>
+          <button className="secondary" onClick={() => inputRef.current?.click()} disabled={loadingFile}>{groups.length ? "继续添加" : "选择多个文件"}</button>
         </section>
         {fileError ? <div className="analysis-alert error"><b>导入失败</b><span>{fileError}</span></div> : null}
 
-        {sheet ? <>
+        {groups.length ? <section className="analysis-batch-manager panel">
+          <div className="panel-head"><div><h3>实验组队列</h3><p>勾选要纳入合并比较的组；同一文件需分析多个工作表时，先“复制”再分别设置。</p></div><div className="batch-head-actions"><span className="analysis-count">{enabledGroups.length} / {groups.length} 组已启用</span><button onClick={clearGroups}>清空全部</button></div></div>
+          <div className="analysis-scope-switch" role="group" aria-label="分析范围">
+            <button className={analysisScope === "combined" ? "active" : ""} onClick={() => { setAnalysisScope("combined"); setRuns({}); }}><b>合并已启用组</b><span>用于跨模型、跨批次统计比较</span></button>
+            <button className={analysisScope === "active" ? "active" : ""} onClick={() => { setAnalysisScope("active"); setRuns({}); }}><b>仅当前设置组</b><span>用于检查或单独分析一组</span></button>
+          </div>
+          <div className="analysis-group-list">{groups.map(group => {
+            const groupSheet = group.sheets.find(item => item.name === group.sheetName);
+            const groupRows = configuredRows(group);
+            const groupDetection = detectDataset(groupRows, group.selectedColumns);
+            return <article key={group.id} className={`${group.id === activeGroup?.id ? "active" : ""} ${group.enabled ? "" : "disabled"}`}>
+              <label className="group-enabled" title="纳入合并分析"><input type="checkbox" checked={group.enabled} onChange={event => updateGroup(group.id, current => ({ ...current, enabled: event.target.checked }))} /><span /></label>
+              <div className="group-copy"><input aria-label="实验组名称" value={group.label} onChange={event => updateGroup(group.id, current => ({ ...current, label: event.target.value || current.label }))} /><small>{group.fileName} · {group.sheetName}</small></div>
+              <div className="group-schema"><b>{groupDetection.schemaLabel}</b><span>{groupRows.length} 行 × {group.selectedColumns.length} 列</span></div>
+              <div className="group-actions"><button className={group.id === activeGroup?.id ? "active" : ""} onClick={() => setActiveGroupId(group.id)}>{group.id === activeGroup?.id ? "设置中" : "设置"}</button><button onClick={() => duplicateGroup(group.id)}>复制</button><button className="danger" onClick={() => removeGroup(group.id)}>移除</button></div>
+              <i className={groupDetection.schema === "unknown" || !groupSheet ? "warn" : "pass"}>{groupDetection.schema === "unknown" || !groupSheet ? "!" : "✓"}</i>
+            </article>;
+          })}</div>
+          <div className="batch-summary"><span><b>{analysisGroups.length}</b> 个分析组</span><span><b>{selectedRows.length.toLocaleString()}</b> 行进入当前分析</span><span><b>{new Set(analysisGroups.flatMap(group => group.sheets.map(item => item.name))).size}</b> 个已选工作表</span></div>
+        </section> : null}
+
+        {sheet && activeGroup ? <>
           <section className="analysis-selection panel">
-            <div className="panel-head"><div><h3>选择处理范围</h3><p>所有分析只使用这里勾选的工作表、数据行和字段列。</p></div><span className="analysis-count">{selectedRows.length} 行 × {selectedColumns.length} 列</span></div>
+            <div className="panel-head"><div><h3>配置当前组 · {activeGroup.label}</h3><p>这里的工作表、数据行和字段列只作用于当前实验组。</p></div><span className="analysis-count">{activeRows.length} 行 × {activeGroup.selectedColumns.length} 列</span></div>
             <div className="analysis-range-controls">
-              <label>工作表<select value={sheetName} onChange={event => changeSheet(event.target.value)}>{sheets.map(item => <option key={item.name}>{item.name}</option>)}</select></label>
-              <label>起始数据行<input type="number" min="1" max={sheet.rows.length} value={rowStart} onChange={event => setRowStart(Math.min(rowEnd, Math.max(1, Number(event.target.value))))} /></label>
-              <label>结束数据行<input type="number" min={rowStart} max={sheet.rows.length} value={rowEnd} onChange={event => setRowEnd(Math.min(sheet.rows.length, Math.max(rowStart, Number(event.target.value))))} /></label>
+              <label>工作表<select value={activeGroup.sheetName} onChange={event => changeSheet(event.target.value)}>{activeGroup.sheets.map(item => <option key={item.name}>{item.name}</option>)}</select></label>
+              <label>起始数据行<input type="number" min="1" max={sheet.rows.length} value={activeGroup.rowStart} onChange={event => updateGroup(activeGroup.id, group => ({ ...group, rowStart: Math.min(group.rowEnd, Math.max(1, Number(event.target.value))) }))} /></label>
+              <label>结束数据行<input type="number" min={activeGroup.rowStart} max={sheet.rows.length} value={activeGroup.rowEnd} onChange={event => updateGroup(activeGroup.id, group => ({ ...group, rowEnd: Math.min(sheet.rows.length, Math.max(group.rowStart, Number(event.target.value))) }))} /></label>
             </div>
-            <div className="analysis-column-head"><div><span className="eyebrow">参与分析的列</span><b>{selectedColumns.length} / {sheet.columns.length}</b></div><div><button onClick={selectAllColumns}>全选</button><button onClick={() => setSelectedColumns([])}>清空</button></div></div>
-            <div className="analysis-column-grid">{sheet.columns.map(column => <label key={column} className={selectedColumns.includes(column) ? "selected" : ""}><input type="checkbox" checked={selectedColumns.includes(column)} onChange={() => toggleColumn(column)} /><span>{column}</span></label>)}</div>
+            <div className="analysis-column-head"><div><span className="eyebrow">参与分析的列</span><b>{activeGroup.selectedColumns.length} / {sheet.columns.length}</b></div><div><button onClick={selectAllColumns}>全选</button><button onClick={() => updateGroup(activeGroup.id, group => ({ ...group, selectedColumns: [] }))}>清空</button></div></div>
+            <div className="analysis-column-grid">{sheet.columns.map(column => <label key={column} className={activeGroup.selectedColumns.includes(column) ? "selected" : ""}><input type="checkbox" checked={activeGroup.selectedColumns.includes(column)} onChange={() => toggleColumn(column)} /><span>{column}</span></label>)}</div>
           </section>
 
           <section className="analysis-preview panel">
-            <div className="panel-head"><div><h3>数据预览</h3><p>显示当前选择范围的前 6 行。</p></div><button className="primary" disabled={!selectedRows.length || !selectedColumns.length} onClick={() => setTab("tasks")}>进入分析任务 <span>→</span></button></div>
-            <div className="analysis-table-scroll"><table><thead><tr><th>#</th>{selectedColumns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{selectedRows.slice(0, 6).map((row, index) => <tr key={index}><td>{rowStart + index}</td>{selectedColumns.map(column => <td key={column}>{typeof row[column] === "object" && row[column] !== null ? JSON.stringify(row[column]) : String(row[column] ?? "")}</td>)}</tr>)}</tbody></table></div>
+            <div className="panel-head"><div><h3>当前组预览</h3><p>显示 {activeGroup.label} 所选范围的前 6 行；分析时按上方范围组合。</p></div><button className="primary" disabled={!selectedRows.length || !selectedColumns.length} onClick={() => setTab("tasks")}>分析 {analysisGroups.length} 组数据 <span>→</span></button></div>
+            <div className="analysis-table-scroll"><table><thead><tr><th>#</th>{activeGroup.selectedColumns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{activeRows.slice(0, 6).map((row, index) => <tr key={index}><td>{activeGroup.rowStart + index}</td>{activeGroup.selectedColumns.map(column => <td key={column}>{typeof row[column] === "object" && row[column] !== null ? JSON.stringify(row[column]) : String(row[column] ?? "")}</td>)}</tr>)}</tbody></table></div>
           </section>
         </> : null}
       </div>
 
       <aside className="analysis-detection panel">
-        <div className="panel-head"><div><span className="eyebrow">自动预检</span><h3>结构与色彩格式</h3></div><span className={`detection-score ${detection.schema === "unknown" ? "warn" : "pass"}`}>{Math.round(detection.confidence * 100)}%</span></div>
+        <div className="panel-head"><div><span className="eyebrow">范围自动预检</span><h3>{analysisScope === "combined" ? `${analysisGroups.length} 组汇总结构` : "当前组结构"}</h3></div><span className={`detection-score ${detection.schema === "unknown" ? "warn" : "pass"}`}>{Math.round(detection.confidence * 100)}%</span></div>
         <div className="detection-hero"><span>{detection.schema === "mixed" ? "A+B" : detection.schema === "task2-gew" ? "GEW" : detection.schema.startsWith("task1") ? "W→C" : "?"}</span><div><small>数据结构</small><b>{detection.schemaLabel}</b></div></div>
         <div className="format-section"><span className="eyebrow">识别到的色彩格式</span>{detection.formats.length ? <div>{detection.formats.map(format => <b key={format}>{format}</b>)}</div> : <p>任务二使用固定色码，或当前列中未识别到颜色通道。</p>}</div>
         <div className="detection-list">{detection.evidence.map((item, index) => <p key={index}><i>✓</i><span>{item}</span></p>)}{detection.warnings.map((item, index) => <p className="warning" key={index}><i>!</i><span>{item}</span></p>)}</div>
@@ -210,7 +341,7 @@ export function AnalysisPlatform() {
     </section> : null}
 
     {tab === "tasks" ? <section className="analysis-task-workspace">
-      <div className="analysis-status-strip"><div><span className="eyebrow">当前数据源</span><b>{fileName || "尚未导入文件"}</b><small>{detection.schemaLabel} · {selectedRows.length} 行 × {selectedColumns.length} 列</small></div><div><strong>{selectedTaskCount}</strong><span>项可运行</span></div><div><strong>{completeCount}</strong><span>项已完成</span></div><button className="secondary" onClick={() => setTab("import")}>调整数据范围</button></div>
+      <div className="analysis-status-strip batch"><div><span className="eyebrow">当前分析范围</span><b>{analysisScope === "combined" ? `${analysisGroups.length} 组实验合并比较` : activeGroup?.label || "尚未选择实验组"}</b><small>{detection.schemaLabel} · {selectedRows.length} 行 × {selectedColumns.length} 列</small></div><div><strong>{analysisGroups.length}</strong><span>个实验组</span></div><div><strong>{selectedTaskCount}</strong><span>项可运行</span></div><div><strong>{completeCount}</strong><span>项已完成</span></div><div className="analysis-batch-actions"><button className="secondary" onClick={() => setTab("import")}>调整数据范围</button><button className="primary" disabled={!selectedTaskCount || Object.values(runs).some(run => run.status === "running")} onClick={() => void Promise.all(TASKS.filter(task => taskAvailable(task.id)).map(task => runTask(task.id)))}>运行全部可用分析</button><button className="secondary" disabled={!completeCount} onClick={() => void exportAllResults()}>导出全部结果 XLSX ↓</button></div></div>
       {(["实验一", "实验二"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : "B"}</span><div><h2>{group === "实验一" ? "词选色分析" : "日内瓦情绪轮分析"}</h2><p>{group === "实验一" ? "对应历史 Bias、KMeans、DeltaE 与色彩可视化脚本。" : "对应 Phase 2 的质量控制、描述统计、差异检验和分布距离。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group === group).map((task, index) => {
         const available = taskAvailable(task.id), run = runs[task.id] || { status: "idle" as const };
         return <article key={task.id} className={`analysis-task-card ${available ? "available" : "disabled"} ${run.status}`}>

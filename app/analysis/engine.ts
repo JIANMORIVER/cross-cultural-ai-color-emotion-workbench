@@ -71,7 +71,7 @@ function normalizeTask1Emotion(value: string) {
 }
 
 const ALIASES = {
-  source: ["source", "group", "model", "model_alias", "platform", "_source_file", "平台", "模型", "来源", "组别"],
+  source: ["source", "group", "model", "model_alias", "platform", "_analysis_group", "_source_file", "平台", "模型", "来源", "组别"],
   emotion: ["emotion", "word", "emotion_word", "情绪", "情绪词"],
   hex: ["hex", "color", "colour", "hex_color", "hex colour", "色值", "颜色"],
   r: ["r", "red", "rgb_r"], g: ["g", "green", "rgb_g"], b: ["b", "blue", "rgb_b"],
