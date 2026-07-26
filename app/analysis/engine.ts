@@ -17,7 +17,11 @@ export type Detection = {
 export type CanonicalColorRow = {
   row: number;
   source: string;
+  cohort: "human" | "ai" | "unspecified";
   emotion: string;
+  inputFormat: ColorFormat;
+  conversionPath: string;
+  consistencyDeltaE: number | null;
   hex: string;
   r: number;
   g: number;
@@ -36,6 +40,7 @@ export type CanonicalColorRow = {
 export type GewRow = {
   participant: string;
   source: string;
+  cohort: "human" | "ai" | "unspecified";
   run: string;
   color: string;
   emotion: string;
@@ -71,15 +76,16 @@ function normalizeTask1Emotion(value: string) {
 }
 
 const ALIASES = {
-  source: ["source", "group", "model", "model_alias", "platform", "_analysis_group", "_source_file", "平台", "模型", "来源", "组别"],
+  source: ["_analysis_group", "source", "group", "model", "model_alias", "platform", "_source_file", "平台", "模型", "来源", "组别"],
   emotion: ["emotion", "word", "emotion_word", "情绪", "情绪词"],
   hex: ["hex", "color", "colour", "hex_color", "hex colour", "色值", "颜色"],
   r: ["r", "red", "rgb_r"], g: ["g", "green", "rgb_g"], b: ["b", "blue", "rgb_b"],
-  h: ["h", "hue", "hsl_h"], s: ["s", "saturation", "hsl_s"], l: ["l", "lightness", "hsl_l"],
+  h: ["h_hsl", "hsl_h", "hue_hsl", "h", "hue"], s: ["s_hsl", "hsl_s", "saturation_hsl", "s", "saturation"], l: ["l_hsl", "hsl_l", "lightness_hsl", "lightness", "l"],
   hh: ["h_hsv", "hsv_h", "hue_hsv"], ss: ["s_hsv", "hsv_s", "saturation_hsv"], v: ["v", "value", "hsv_v"],
   labL: ["l*", "lab_l", "l_lab", "cie_l"], labA: ["a*", "lab_a", "a_lab", "cie_a"], labB: ["b*", "lab_b", "b_lab", "cie_b"],
   participant: ["participant", "participant_id", "sample_id", "id", "trial_id", "实验id", "样本id"],
   run: ["run", "run_index", "repetition", "轮次", "重复轮次"],
+  cohort: ["_analysis_cohort", "cohort", "participant_type", "source_type", "样本类型", "组类型"],
 };
 
 function cleanName(value: string) { return value.trim().toLowerCase().replaceAll("－", "-"); }
@@ -95,6 +101,21 @@ function num(value: CellValue) {
 function text(value: CellValue, fallback = "") { return value == null ? fallback : String(value).trim(); }
 function clamp(value: number, min = 0, max = 1) { return Math.min(max, Math.max(min, value)); }
 function round(value: number, digits = 4) { const power = 10 ** digits; return Math.round(value * power) / power; }
+function finiteColumnValues(rows: DataRow[], column?: string) {
+  return column ? rows.map(row => num(row[column])).filter(Number.isFinite) : [];
+}
+function usesUnitInterval(rows: DataRow[], columns: Array<string | undefined>) {
+  const values = columns.flatMap(column => finiteColumnValues(rows, column));
+  return values.length > 0 && values.every(value => Math.abs(value) <= 1);
+}
+function normalizeHue(value: number, unitInterval: boolean) { return unitInterval ? value * 360 : value; }
+function normalizeProportion(value: number, unitInterval: boolean) { return unitInterval ? value : value / 100; }
+function normalizeCohort(value: CellValue): CanonicalColorRow["cohort"] {
+  const normalized = text(value).toLowerCase();
+  if (["human", "人类", "participant", "participants"].includes(normalized)) return "human";
+  if (["ai", "model", "模型", "人工智能"].includes(normalized)) return "ai";
+  return "unspecified";
+}
 
 export function detectDataset(rows: DataRow[], columns: string[]): Detection {
   const wide = columns.filter(column => /^color_data\..+\.(h|s|l|hex)$/i.test(column));
@@ -120,7 +141,9 @@ export function detectDataset(rows: DataRow[], columns: string[]): Detection {
   if ((findColumn(columns, ALIASES.hh) || findColumn(columns, ALIASES.h)) && (findColumn(columns, ALIASES.ss) || findColumn(columns, ALIASES.s)) && findColumn(columns, ALIASES.v)) {
     formats.add("HSV"); evidence.push("识别到 H / S / V 三通道列");
   }
-  if (findColumn(columns, ALIASES.labL) && findColumn(columns, ALIASES.labA) && findColumn(columns, ALIASES.labB)) {
+  const labAColumn = findColumn(columns, ALIASES.labA), labBColumn = findColumn(columns, ALIASES.labB);
+  const labLColumn = findColumn(columns, ALIASES.labL) || (labAColumn && labBColumn ? columns.find(column => cleanName(column) === "l") : undefined);
+  if (labLColumn && labAColumn && labBColumn) {
     formats.add("Lab"); evidence.push("识别到 CIE L* / a* / b* 三通道列");
   }
   if (wide.some(column => /\.hex$/i.test(column))) formats.add("HEX");
@@ -160,16 +183,16 @@ export function rgbToHex(r: number, g: number, b: number) {
 }
 function hslToRgb(h: number, s: number, l: number) {
   h = ((h % 360) + 360) % 360 / 360; s = clamp(s); l = clamp(l);
-  if (s === 0) { const gray = Math.round(l * 255); return { r: gray, g: gray, b: gray }; }
+  if (s === 0) { const gray = l * 255; return { r: gray, g: gray, b: gray }; }
   const q = l < .5 ? l * (1 + s) : l + s - l * s; const p = 2 * l - q;
   const channel = (t: number) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1 / 6) return p + (q - p) * 6 * t; if (t < 1 / 2) return q; if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; };
-  return { r: Math.round(channel(h + 1 / 3) * 255), g: Math.round(channel(h) * 255), b: Math.round(channel(h - 1 / 3) * 255) };
+  return { r: channel(h + 1 / 3) * 255, g: channel(h) * 255, b: channel(h - 1 / 3) * 255 };
 }
 function hsvToRgb(h: number, s: number, v: number) {
   h = ((h % 360) + 360) % 360; s = clamp(s); v = clamp(v);
   const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
   const [rp, gp, bp] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
-  return { r: Math.round((rp + m) * 255), g: Math.round((gp + m) * 255), b: Math.round((bp + m) * 255) };
+  return { r: (rp + m) * 255, g: (gp + m) * 255, b: (bp + m) * 255 };
 }
 function rgbToHsl(r: number, g: number, b: number) {
   r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); const d = max - min; const l = (max + min) / 2;
@@ -194,31 +217,62 @@ function labToRgb(l: number, a: number, b: number) {
   const fy = (l + 16) / 116, fx = a / 500 + fy, fz = fy - b / 200;
   const inv = (value: number) => value ** 3 > .008856 ? value ** 3 : (value - 16 / 116) / 7.787;
   const x = .95047 * inv(fx), y = inv(fy), z = 1.08883 * inv(fz);
-  const r = x * 3.2404542 + y * -.969266 + z * .0556434;
-  const g = x * -.969266 + y * 1.8760108 + z * -.2040259;
+  const r = x * 3.2404542 + y * -1.5371385 + z * -.4985314;
+  const g = x * -.969266 + y * 1.8760108 + z * .0415560;
   const bl = x * .0556434 + y * -.2040259 + z * 1.0572252;
   const gamma = (value: number) => 255 * (value <= .0031308 ? 12.92 * value : 1.055 * value ** (1 / 2.4) - .055);
-  return { r: Math.round(clamp(gamma(r), 0, 255)), g: Math.round(clamp(gamma(g), 0, 255)), b: Math.round(clamp(gamma(bl), 0, 255)) };
+  return { r: clamp(gamma(r), 0, 255), g: clamp(gamma(g), 0, 255), b: clamp(gamma(bl), 0, 255) };
 }
 
-function canonical(row: number, source: string, emotion: string, rgb: { r: number; g: number; b: number }): CanonicalColorRow {
-  const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b), hsv = rgbToHsv(rgb.r, rgb.g, rgb.b), lab = rgbToLab(rgb.r, rgb.g, rgb.b);
-  return { row, source, emotion, hex: rgbToHex(rgb.r, rgb.g, rgb.b), r: rgb.r, g: rgb.g, b: rgb.b, h: hsl.h, s: hsl.s, l: hsl.l, hsvH: hsv.h, hsvS: hsv.s, hsvV: hsv.v, labL: lab.l, labA: lab.a, labB: lab.b };
+function canonical(
+  row: number,
+  source: string,
+  cohort: CanonicalColorRow["cohort"],
+  emotion: string,
+  rgb: { r: number; g: number; b: number },
+  inputFormat: ColorFormat,
+  conversionPath: string,
+  consistencyDeltaE: number | null = null,
+  authoritativeLab?: { l: number; a: number; b: number },
+): CanonicalColorRow {
+  const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b), hsv = rgbToHsv(rgb.r, rgb.g, rgb.b), lab = authoritativeLab || rgbToLab(rgb.r, rgb.g, rgb.b);
+  return { row, source, cohort, emotion, inputFormat, conversionPath, consistencyDeltaE, hex: rgbToHex(rgb.r, rgb.g, rgb.b), r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b), h: hsl.h, s: hsl.s, l: hsl.l, hsvH: hsv.h, hsvS: hsv.s, hsvV: hsv.v, labL: lab.l, labA: lab.a, labB: lab.b };
 }
 
-function scaled(value: number) { return Math.abs(value) > 1 ? value / 100 : value; }
+function rgbDeltaE(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
+  const aa = rgbToLab(a.r, a.g, a.b), bb = rgbToLab(b.r, b.g, b.b);
+  return Math.sqrt((aa.l - bb.l) ** 2 + (aa.a - bb.a) ** 2 + (aa.b - bb.b) ** 2);
+}
 
 export function parseColorRows(rows: DataRow[], columns: string[], schema: SchemaKind): { rows: CanonicalColorRow[]; rejected: number } {
   const result: CanonicalColorRow[] = []; let rejected = 0;
   const sourceColumn = findColumn(columns, ALIASES.source);
+  const cohortColumn = findColumn(columns, ALIASES.cohort);
   if (schema === "task1-wide" || schema === "mixed") {
     const emotions = [...new Set(columns.map(column => column.match(/^color_data\.(.+)\.(h|s|l|hex)$/i)?.[1]).filter((value): value is string => Boolean(value)))];
     rows.forEach((raw, index) => emotions.forEach(emotion => {
       const key = (channel: string) => columns.find(column => cleanName(column) === cleanName(`color_data.${emotion}.${channel}`));
       const hex = key("hex") ? hexToRgb(text(raw[key("hex")!])) : null;
       const h = num(raw[key("h") || ""]), s = num(raw[key("s") || ""]), l = num(raw[key("l") || ""]);
-      const rgb = hex || ([h, s, l].every(Number.isFinite) ? hslToRgb(Math.abs(h) <= 1 ? h * 360 : h, scaled(s), scaled(l)) : null);
-      if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), normalizeTask1Emotion(emotion), rgb)); else rejected += 1;
+      // Historical SurveyResponse/Bias_OriginalData.py contract is fixed:
+      // H is degrees (0–360), S/L are percentages (0–100). Do not infer
+      // units per cell: H=1° and S=1% are valid observations, not 1 turn/100%.
+      const hslRgb = [h, s, l].every(Number.isFinite) ? hslToRgb(h, s / 100, l / 100) : null;
+      const rgb = hslRgb || hex;
+      if (rgb) {
+        const inputFormat: ColorFormat = hslRgb ? "HSL" : "HEX";
+        const mismatch = hslRgb && hex ? rgbDeltaE(hslRgb, hex) : null;
+        result.push(canonical(
+          index + 1,
+          text(sourceColumn ? raw[sourceColumn] : null, "未分组"),
+          normalizeCohort(cohortColumn ? raw[cohortColumn] : null),
+          normalizeTask1Emotion(emotion),
+          rgb,
+          inputFormat,
+          hslRgb ? "HSL → sRGB (D65) → CIELAB / HSV" : "HEX → sRGB → HSL / HSV / CIELAB (D65)",
+          mismatch,
+        ));
+      } else rejected += 1;
     }));
     return { rows: result, rejected };
   }
@@ -226,26 +280,67 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
   const emotionColumn = findColumn(columns, ALIASES.emotion);
   const hexColumn = findColumn(columns, ALIASES.hex);
   const rCol = findColumn(columns, ALIASES.r), gCol = findColumn(columns, ALIASES.g), bCol = findColumn(columns, ALIASES.b);
-  const hCol = findColumn(columns, ALIASES.h), sCol = findColumn(columns, ALIASES.s), lCol = findColumn(columns, ALIASES.l);
+  const labACol = findColumn(columns, ALIASES.labA), labBCol = findColumn(columns, ALIASES.labB);
+  // Historical normalized files use exactly "L", "a*", "b*" for CIELAB,
+  // while HSL lightness is stored separately as "L_hsl".
+  const labLCol = findColumn(columns, ALIASES.labL) || (labACol && labBCol ? columns.find(column => cleanName(column) === "l") : undefined);
+  const hCol = findColumn(columns, ALIASES.h), sCol = findColumn(columns, ALIASES.s);
+  const lCandidate = findColumn(columns, ALIASES.l);
+  const lCol = lCandidate && lCandidate === labLCol ? undefined : lCandidate;
   const hhCol = findColumn(columns, ALIASES.hh) || hCol, ssCol = findColumn(columns, ALIASES.ss) || sCol, vCol = findColumn(columns, ALIASES.v);
-  const labLCol = findColumn(columns, ALIASES.labL), labACol = findColumn(columns, ALIASES.labA), labBCol = findColumn(columns, ALIASES.labB);
+  const rgbUnitInterval = usesUnitInterval(rows, [rCol, gCol, bCol]);
+  const legacyHslContract = cleanName(hCol || "") === "h" && cleanName(sCol || "") === "s" && cleanName(lCol || "") === "l_hsl";
+  const hslHueExplicitDegrees = ["h_hsl", "hue_hsl"].includes(cleanName(hCol || "")) || legacyHslContract;
+  const hsvHueExplicitDegrees = ["h_hsv", "hue_hsv"].includes(cleanName(hhCol || ""));
+  const hslHueUnitInterval = !hslHueExplicitDegrees && usesUnitInterval(rows, [hCol]);
+  const hslUnitInterval = !legacyHslContract && usesUnitInterval(rows, [sCol, lCol]);
+  const hsvHueUnitInterval = !hsvHueExplicitDegrees && usesUnitInterval(rows, [hhCol]);
+  const hsvUnitInterval = usesUnitInterval(rows, [ssCol, vCol]);
   rows.forEach((raw, index) => {
-    let rgb = hexColumn ? hexToRgb(text(raw[hexColumn])) : null;
+    const hexRgb = hexColumn ? hexToRgb(text(raw[hexColumn])) : null;
     const rgbValues = [num(raw[rCol || ""]), num(raw[gCol || ""]), num(raw[bCol || ""])];
-    if (!rgb && rgbValues.every(Number.isFinite)) rgb = { r: rgbValues[0], g: rgbValues[1], b: rgbValues[2] };
+    const directRgb = rgbValues.every(Number.isFinite) ? {
+      r: rgbValues[0] * (rgbUnitInterval ? 255 : 1),
+      g: rgbValues[1] * (rgbUnitInterval ? 255 : 1),
+      b: rgbValues[2] * (rgbUnitInterval ? 255 : 1),
+    } : null;
     const hslValues = [num(raw[hCol || ""]), num(raw[sCol || ""]), num(raw[lCol || ""])];
-    if (!rgb && hslValues.every(Number.isFinite)) rgb = hslToRgb(Math.abs(hslValues[0]) <= 1 ? hslValues[0] * 360 : hslValues[0], scaled(hslValues[1]), scaled(hslValues[2]));
+    const hslRgb = hslValues.every(Number.isFinite) ? hslToRgb(normalizeHue(hslValues[0], hslHueUnitInterval), normalizeProportion(hslValues[1], hslUnitInterval), normalizeProportion(hslValues[2], hslUnitInterval)) : null;
     const hsvValues = [num(raw[hhCol || ""]), num(raw[ssCol || ""]), num(raw[vCol || ""])];
-    if (!rgb && hsvValues.every(Number.isFinite)) rgb = hsvToRgb(Math.abs(hsvValues[0]) <= 1 ? hsvValues[0] * 360 : hsvValues[0], scaled(hsvValues[1]), scaled(hsvValues[2]));
+    const hsvRgb = hsvValues.every(Number.isFinite) ? hsvToRgb(normalizeHue(hsvValues[0], hsvHueUnitInterval), normalizeProportion(hsvValues[1], hsvUnitInterval), normalizeProportion(hsvValues[2], hsvUnitInterval)) : null;
     const labValues = [num(raw[labLCol || ""]), num(raw[labACol || ""]), num(raw[labBCol || ""])];
-    if (!rgb && labValues.every(Number.isFinite)) rgb = labToRgb(labValues[0], labValues[1], labValues[2]);
-    if (rgb) result.push(canonical(index + 1, text(sourceColumn ? raw[sourceColumn] : null, "未分组"), normalizeTask1Emotion(text(emotionColumn ? raw[emotionColumn] : null, "未标注")), rgb)); else rejected += 1;
+    const labRgb = labValues.every(Number.isFinite) ? labToRgb(labValues[0], labValues[1], labValues[2]) : null;
+    const selected = hslRgb
+      ? { rgb: hslRgb, format: "HSL" as const, path: "HSL → sRGB (D65) → CIELAB / HSV" }
+      : directRgb
+        ? { rgb: directRgb, format: "RGB" as const, path: "sRGB → HSL / HSV / CIELAB (D65)" }
+        : hexRgb
+          ? { rgb: hexRgb, format: "HEX" as const, path: "HEX → sRGB → HSL / HSV / CIELAB (D65)" }
+          : hsvRgb
+            ? { rgb: hsvRgb, format: "HSV" as const, path: "HSV → sRGB → HSL / CIELAB (D65)" }
+            : labRgb
+              ? { rgb: labRgb, format: "Lab" as const, path: "CIELAB (D65) → sRGB → HSL / HSV" }
+              : null;
+    if (selected) {
+      const comparison = [directRgb, hexRgb, hsvRgb, labRgb].find(candidate => candidate && candidate !== selected.rgb);
+      result.push(canonical(
+        index + 1,
+        text(sourceColumn ? raw[sourceColumn] : null, "未分组"),
+        normalizeCohort(cohortColumn ? raw[cohortColumn] : null),
+        normalizeTask1Emotion(text(emotionColumn ? raw[emotionColumn] : null, "未标注")),
+        selected.rgb,
+        selected.format,
+        selected.path,
+        comparison ? rgbDeltaE(selected.rgb, comparison) : null,
+        selected.format === "Lab" ? { l: labValues[0], a: labValues[1], b: labValues[2] } : undefined,
+      ));
+    } else rejected += 1;
   });
   return { rows: result, rejected };
 }
 
 export function colorRowsToExport(rows: CanonicalColorRow[]): ExportRow[] {
-  return rows.map(row => ({ 行号: row.row, 来源: row.source, 情绪: row.emotion, HEX: row.hex, R: row.r, G: row.g, B: row.b, H_HSL: round(row.h, 2), S_HSL: round(row.s, 4), L_HSL: round(row.l, 4), H_HSV: round(row.hsvH, 2), S_HSV: round(row.hsvS, 4), V_HSV: round(row.hsvV, 4), L_Lab: round(row.labL, 3), a_Lab: round(row.labA, 3), b_Lab: round(row.labB, 3) }));
+  return rows.map(row => ({ 行号: row.row, 来源: row.source, 组类型: row.cohort, 情绪: row.emotion, 原始权威格式: row.inputFormat, 转换路径: row.conversionPath, 多格式一致性ΔE76: row.consistencyDeltaE == null ? null : round(row.consistencyDeltaE, 4), HEX: row.hex, R: row.r, G: row.g, B: row.b, H_HSL: round(row.h, 2), S_HSL: round(row.s, 4), L_HSL: round(row.l, 4), H_HSV: round(row.hsvH, 2), S_HSV: round(row.hsvS, 4), V_HSV: round(row.hsvV, 4), L_Lab: round(row.labL, 3), a_Lab: round(row.labA, 3), b_Lab: round(row.labB, 3) }));
 }
 
 function distance(a: CanonicalColorRow | number[], b: CanonicalColorRow | number[]) {
@@ -253,15 +348,42 @@ function distance(a: CanonicalColorRow | number[], b: CanonicalColorRow | number
   return Math.sqrt(aa.reduce((sum, value, index) => sum + (value - bb[index]) ** 2, 0));
 }
 function meanVector(points: number[][]) { return [0, 1, 2].map(index => points.reduce((sum, point) => sum + point[index], 0) / points.length); }
-function kmeans(points: number[][], k: number) {
-  let centers = Array.from({ length: k }, (_, index) => points[Math.floor(index * points.length / k)].slice()); let labels = new Array(points.length).fill(0);
+function seededRandom(seed: number) {
+  let state = seed >>> 0;
+  return () => { state = (1664525 * state + 1013904223) >>> 0; return state / 4294967296; };
+}
+function kmeansOnce(points: number[][], k: number, seed: number) {
+  const random = seededRandom(seed), centers: number[][] = [points[Math.floor(random() * points.length)].slice()];
+  while (centers.length < k) {
+    const weights = points.map(point => Math.min(...centers.map(center => distance(point, center) ** 2))), total = weights.reduce((sum, value) => sum + value, 0);
+    if (!total) {
+      const unused = points.find(point => !centers.some(center => distance(point, center) === 0));
+      if (!unused) break;
+      centers.push(unused.slice()); continue;
+    }
+    let threshold = random() * total, chosen = points.length - 1;
+    for (let index = 0; index < points.length; index += 1) { threshold -= weights[index]; if (threshold <= 0) { chosen = index; break; } }
+    centers.push(points[chosen].slice());
+  }
+  let labels = new Array(points.length).fill(0);
   for (let iteration = 0; iteration < 60; iteration += 1) {
     const next = points.map(point => centers.reduce((best, center, index) => distance(point, center) < distance(point, centers[best]) ? index : best, 0));
     const changed = next.some((value, index) => value !== labels[index]); labels = next;
-    centers = centers.map((center, index) => { const cluster = points.filter((_, pointIndex) => labels[pointIndex] === index); return cluster.length ? meanVector(cluster) : center; });
+    centers.forEach((center, index) => { const cluster = points.filter((_, pointIndex) => labels[pointIndex] === index); centers[index] = cluster.length ? meanVector(cluster) : center; });
     if (!changed && iteration > 0) break;
   }
-  return { labels, centers };
+  const inertia = points.reduce((sum, point, index) => sum + distance(point, centers[labels[index]]) ** 2, 0);
+  return { labels, centers, inertia };
+}
+function kmeans(points: number[][], k: number) {
+  let best = kmeansOnce(points, k, 42 + k * 1009);
+  // Match the historical sklearn intent (random_state=42, n_init=10):
+  // ten deterministic k-means++ starts, retaining minimum within-cluster SS.
+  for (let start = 1; start < 10; start += 1) {
+    const candidate = kmeansOnce(points, k, 42 + k * 1009 + start * 7919);
+    if (candidate.inertia < best.inertia) best = candidate;
+  }
+  return best;
 }
 function silhouette(points: number[][], labels: number[], k: number) {
   if (points.length <= k) return -1;
@@ -278,12 +400,13 @@ export function runColorClustering(colors: CanonicalColorRow[]): AnalysisResult 
   const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
   keys.forEach(key => {
     const [source, emotion] = key.split("\u0000"); const group = colors.filter(row => row.source === source && row.emotion === emotion); const points = group.map(row => [row.labL, row.labA, row.labB]);
-    if (points.length < 5) return;
-    let bestK = 2, bestScore = -Infinity, best = kmeans(points, 2); const maxK = Math.min(5, points.length - 1);
+    const uniquePoints = new Set(points.map(point => point.map(value => value.toFixed(8)).join("\u0000"))).size;
+    if (points.length < 5 || uniquePoints < 2) return;
+    let bestK = 2, bestScore = -Infinity, best = kmeans(points, 2); const maxK = Math.min(5, points.length - 1, uniquePoints);
     for (let k = 2; k <= maxK; k += 1) { const candidate = kmeans(points, k); const score = silhouette(points, candidate.labels, k); if (score > bestScore) { bestK = k; bestScore = score; best = candidate; } }
     best.centers.forEach((center, cluster) => { const count = best.labels.filter(label => label === cluster).length; const rgb = labToRgb(center[0], center[1], center[2]); rows.push({ 来源: source, 情绪: emotion, 样本数: points.length, 最佳K: bestK, 轮廓系数: round(bestScore), 簇: cluster + 1, 簇权重: round(count / points.length), 中心HEX: rgbToHex(rgb.r, rgb.g, rgb.b), 中心L: round(center[0]), 中心a: round(center[1]), 中心b: round(center[2]) }); });
   });
-  return { id: "task1-cluster", title: "最佳 K 与 Lab 色彩聚类", kind: "colors", rows, summary: [{ label: "来源×情绪组合", value: String(keys.length) }, { label: "聚类中心", value: String(rows.length) }, { label: "K 搜索范围", value: "2–5" }], note: "沿用 Bias_kNumbers.py 的规则：样本数不足 5 的组合跳过；其余在 CIE Lab 空间搜索 K=2–5，并用平均轮廓系数选择最佳 K。" };
+  return { id: "task1-cluster", title: "最佳 K 与 Lab 色彩聚类", kind: "colors", rows, summary: [{ label: "来源×情绪组合", value: String(keys.length) }, { label: "聚类中心", value: String(rows.length) }, { label: "K 搜索范围", value: "2–5" }], note: "沿用 Bias_kNumbers.py 的规则：样本数不足 5 的组合跳过；其余在 CIE Lab 空间搜索 K=2–5，并用平均轮廓系数选择最佳 K。每个K执行10次确定性k-means++初始化并保留组内平方和最小解，对齐历史 sklearn n_init=10 的分析意图。" };
 }
 
 function symmetricMinDistance(a: CanonicalColorRow[], b: CanonicalColorRow[]) {
@@ -303,7 +426,14 @@ export function runDeltaE(colors: CanonicalColorRow[]): AnalysisResult {
 }
 
 export function runColorSummary(colors: CanonicalColorRow[], rejected: number): AnalysisResult {
-  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))]; const rows = keys.map(key => { const [source, emotion] = key.split("\u0000"); const group = colors.filter(row => row.source === source && row.emotion === emotion); const lab = meanVector(group.map(row => [row.labL, row.labA, row.labB])); const rgb = labToRgb(lab[0], lab[1], lab[2]); return { 来源: source, 情绪: emotion, N: group.length, 平均HEX: rgbToHex(rgb.r, rgb.g, rgb.b), 平均H: round(group.reduce((sum, row) => sum + row.h, 0) / group.length, 2), 平均S: round(group.reduce((sum, row) => sum + row.s, 0) / group.length), 平均L: round(group.reduce((sum, row) => sum + row.l, 0) / group.length), 平均Lab_L: round(lab[0]), 平均Lab_a: round(lab[1]), 平均Lab_b: round(lab[2]) }; });
+  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))]; const rows = keys.map(key => {
+    const [source, emotion] = key.split("\u0000");
+    const group = colors.filter(row => row.source === source && row.emotion === emotion);
+    const lab = meanVector(group.map(row => [row.labL, row.labA, row.labB])), rgb = labToRgb(lab[0], lab[1], lab[2]);
+    const chromatic = group.filter(row => row.hsvS > .01), angles = chromatic.map(row => row.h / 180 * Math.PI);
+    const meanHue = angles.length ? ((Math.atan2(angles.reduce((sum, value) => sum + Math.sin(value), 0), angles.reduce((sum, value) => sum + Math.cos(value), 0)) * 180 / Math.PI) + 360) % 360 : null;
+    return { 来源: source, 情绪: emotion, N: group.length, 有效色相N: chromatic.length, 平均HEX: rgbToHex(rgb.r, rgb.g, rgb.b), HSL圆均值H: meanHue == null ? null : round(meanHue, 2), 平均S_HSL: round(group.reduce((sum, row) => sum + row.s, 0) / group.length), 平均L_HSL: round(group.reduce((sum, row) => sum + row.l, 0) / group.length), 平均Lab_L: round(lab[0]), 平均Lab_a: round(lab[1]), 平均Lab_b: round(lab[2]) };
+  });
   return { id: "task1-summary", title: "来源 × 情绪色彩描述", kind: "colors", rows, summary: [{ label: "有效色彩", value: String(colors.length) }, { label: "组合", value: String(rows.length) }, { label: "拒绝值", value: String(rejected) }] };
 }
 
@@ -325,12 +455,163 @@ export function runWithinGroupDelta(colors: CanonicalColorRow[]): AnalysisResult
   return { id: "task1-within-delta", title: "组内色差矩阵与一致性", kind: "statistics", rows, summary: [{ label: "来源×情绪", value: String(rows.length) }, { label: "来源", value: String(new Set(colors.map(row => row.source)).size) }, { label: "有效色彩", value: String(colors.length) }], note: "对应 demac.py 与 de2mac.py：对角线排除，汇总平均最近邻色差和全部样本对平均色差。" };
 }
 
+function hueHistogram(rows: CanonicalColorRow[], bins = 12) {
+  const counts = new Array(bins).fill(0);
+  // Hue is undefined for achromatic samples. Treating every grey as H=0 would
+  // manufacture a red peak and bias entropy/JSD.
+  rows.filter(row => row.hsvS > .01).forEach(row => { counts[Math.min(bins - 1, Math.floor((((row.hsvH % 360) + 360) % 360) / 360 * bins))] += 1; });
+  return counts;
+}
+
+export function runColorDiversity(colors: CanonicalColorRow[]): AnalysisResult {
+  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
+  const rows: ExportRow[] = keys.map(key => {
+    const [source, emotion] = key.split("\u0000"), group = colors.filter(row => row.source === source && row.emotion === emotion);
+    const chromatic = group.filter(row => row.hsvS > .01);
+    const angles = chromatic.map(row => row.hsvH / 180 * Math.PI);
+    const meanSin = angles.length ? angles.reduce((sum, value) => sum + Math.sin(value), 0) / angles.length : 0;
+    const meanCos = angles.length ? angles.reduce((sum, value) => sum + Math.cos(value), 0) / angles.length : 0;
+    const resultant = Math.sqrt(meanSin ** 2 + meanCos ** 2);
+    const meanHue = angles.length ? ((Math.atan2(meanSin, meanCos) * 180 / Math.PI) + 360) % 360 : null;
+    const histogram = hueHistogram(group), entropy = histogram.reduce((sum, count) => {
+      const probability = count / Math.max(1, chromatic.length);
+      return probability ? sum - probability * Math.log2(probability) : sum;
+    }, 0);
+    const centroid = meanVector(group.map(row => [row.labL, row.labA, row.labB]));
+    const rms = Math.sqrt(group.reduce((sum, row) => sum + distance(row, centroid) ** 2, 0) / group.length);
+    return {
+      来源: source,
+      组类型: group[0]?.cohort || "unspecified",
+      情绪: emotion,
+      N: group.length,
+      有效色相N: chromatic.length,
+      HSV圆均值H_度: meanHue == null ? null : round(meanHue, 3),
+      色相圆方差: angles.length ? round(1 - resultant, 6) : null,
+      色相熵_12箱: round(entropy, 6),
+      有效色相数: round(2 ** entropy, 4),
+      平均HSV_S: round(group.reduce((sum, row) => sum + row.hsvS, 0) / group.length, 5),
+      平均HSV_V: round(group.reduce((sum, row) => sum + row.hsvV, 0) / group.length, 5),
+      Lab质心RMS色差: round(rms, 5),
+    };
+  });
+  return { id: "task1-diversity", title: "色相圆统计与色彩多样性", kind: "statistics", rows, summary: [{ label: "来源×情绪", value: String(rows.length) }, { label: "色相分箱", value: "12" }, { label: "空间", value: "HSV + Lab" }], note: "色相按圆变量处理，避免 0°/360°断点；熵反映色相覆盖，Lab 质心 RMS 色差反映整体离散度。" };
+}
+
+export function runHueDistributionDistance(colors: CanonicalColorRow[]): AnalysisResult {
+  const sources = [...new Set(colors.map(row => row.source))], emotions = [...new Set(colors.map(row => row.emotion))], rows: ExportRow[] = [];
+  emotions.forEach(emotion => sources.forEach((sourceA, index) => sources.slice(index + 1).forEach(sourceB => {
+    const a = colors.filter(row => row.source === sourceA && row.emotion === emotion), b = colors.filter(row => row.source === sourceB && row.emotion === emotion);
+    const histogramA = hueHistogram(a), histogramB = hueHistogram(b);
+    const chromaticA = histogramA.reduce((sum, value) => sum + value, 0), chromaticB = histogramB.reduce((sum, value) => sum + value, 0);
+    if (chromaticA && chromaticB) rows.push({ 情绪: emotion, 来源A: sourceA, 来源B: sourceB, A样本数: a.length, B样本数: b.length, A有效色相N: chromaticA, B有效色相N: chromaticB, 色相Jensen_Shannon距离: round(Math.sqrt(jsd(histogramA, histogramB)), 6) });
+  })));
+  return { id: "task1-hue-jsd", title: "色相分布距离", kind: "matrix", rows, summary: [{ label: "来源对×情绪", value: String(rows.length) }, { label: "距离范围", value: "0–1" }, { label: "色相分箱", value: "12" }], note: "将 HSV 色相映射为 12 个圆周分箱后计算 Jensen–Shannon 距离，补充 Lab 色差对分布形状不敏感的问题。" };
+}
+
+export function runHumanAiColorAlignment(colors: CanonicalColorRow[]): AnalysisResult {
+  const humanSources = [...new Set(colors.filter(row => row.cohort === "human").map(row => row.source))];
+  const aiSources = [...new Set(colors.filter(row => row.cohort === "ai").map(row => row.source))];
+  const emotions = [...new Set(colors.map(row => row.emotion))], rows: ExportRow[] = [];
+  emotions.forEach(emotion => {
+    const baselines: number[] = [];
+    humanSources.forEach((sourceA, index) => humanSources.slice(index + 1).forEach(sourceB => {
+      const value = symmetricMinDistance(colors.filter(row => row.source === sourceA && row.emotion === emotion), colors.filter(row => row.source === sourceB && row.emotion === emotion));
+      if (Number.isFinite(value)) baselines.push(value);
+    }));
+    const sorted = baselines.sort((a, b) => a - b), baseline = sorted.length ? sorted[Math.floor(sorted.length / 2)] : NaN;
+    aiSources.forEach(aiSource => {
+      const comparisons = humanSources.map(humanSource => ({ humanSource, value: symmetricMinDistance(colors.filter(row => row.source === aiSource && row.emotion === emotion), colors.filter(row => row.source === humanSource && row.emotion === emotion)) })).filter(item => Number.isFinite(item.value)).sort((a, b) => a.value - b.value);
+      if (!comparisons.length) return;
+      rows.push({ 情绪: emotion, AI来源: aiSource, 最近人类组: comparisons[0].humanSource, 最近人类组ΔE76: round(comparisons[0].value, 4), 人类组间基线中位ΔE76: Number.isFinite(baseline) ? round(baseline, 4) : null, 相对人类基线比: Number.isFinite(baseline) && baseline > 0 ? round(comparisons[0].value / baseline, 5) : null, 比人类组间基线更接近: Number.isFinite(baseline) ? comparisons[0].value <= baseline : false });
+    });
+  });
+  return { id: "task1-human-ai", title: "人类–AI色彩对齐", kind: "statistics", rows, summary: [{ label: "人类组", value: String(humanSources.length) }, { label: "AI组", value: String(aiSources.length) }, { label: "对齐单元", value: String(rows.length) }], note: "对每个 AI×情绪寻找最近的人类文化组，并以同一情绪下人类组间距离中位数作为可解释基线。该结果是探索性对齐指标，不替代预注册推断检验。" };
+}
+
+function combinations(size: number, choose: number) {
+  const output: number[][] = [], current: number[] = [];
+  const visit = (start: number) => {
+    if (current.length === choose) { output.push(current.slice()); return; }
+    for (let index = start; index <= size - (choose - current.length); index += 1) {
+      current.push(index); visit(index + 1); current.pop();
+    }
+  };
+  visit(0);
+  return output;
+}
+
+function exactVectorPermutationP(vectors: number[][], firstGroupSize: number) {
+  if (!firstGroupSize || firstGroupSize >= vectors.length) return NaN;
+  const observedFirst = meanVector(vectors.slice(0, firstGroupSize));
+  const observedSecond = meanVector(vectors.slice(firstGroupSize));
+  const observed = distance(observedFirst, observedSecond);
+  const assignments = combinations(vectors.length, firstGroupSize);
+  if (assignments.length > 5000) return NaN;
+  let extreme = 0;
+  assignments.forEach(indices => {
+    const selected = new Set(indices), first = vectors.filter((_, index) => selected.has(index)), second = vectors.filter((_, index) => !selected.has(index));
+    if (distance(meanVector(first), meanVector(second)) >= observed - 1e-12) extreme += 1;
+  });
+  return extreme / assignments.length;
+}
+
+function exactScalarPermutationP(values: number[], firstGroupSize: number) {
+  if (!firstGroupSize || firstGroupSize >= values.length) return NaN;
+  const average = (items: number[]) => items.reduce((sum, value) => sum + value, 0) / items.length;
+  const observed = Math.abs(average(values.slice(0, firstGroupSize)) - average(values.slice(firstGroupSize)));
+  const assignments = combinations(values.length, firstGroupSize);
+  if (assignments.length > 5000) return NaN;
+  let extreme = 0;
+  assignments.forEach(indices => {
+    const selected = new Set(indices), first = values.filter((_, index) => selected.has(index)), second = values.filter((_, index) => !selected.has(index));
+    if (Math.abs(average(first) - average(second)) >= observed - 1e-12) extreme += 1;
+  });
+  return extreme / assignments.length;
+}
+
+export function runHumanAiColorCohortTest(colors: CanonicalColorRow[]): AnalysisResult {
+  const emotions = [...new Set(colors.map(row => row.emotion))];
+  const raw = emotions.flatMap(emotion => {
+    const emotionRows = colors.filter(row => row.emotion === emotion && row.cohort !== "unspecified");
+    const sourceKeys = [...new Set(emotionRows.map(row => `${row.cohort}\u0000${row.source}`))];
+    const sourceCentroids = sourceKeys.map(key => {
+      const [cohort, source] = key.split("\u0000");
+      const group = emotionRows.filter(row => row.cohort === cohort && row.source === source);
+      return { cohort, source, n: group.length, centroid: meanVector(group.map(row => [row.labL, row.labA, row.labB])) };
+    });
+    const human = sourceCentroids.filter(item => item.cohort === "human"), ai = sourceCentroids.filter(item => item.cohort === "ai");
+    if (!human.length || !ai.length) return [];
+    const humanCentroid = meanVector(human.map(item => item.centroid)), aiCentroid = meanVector(ai.map(item => item.centroid));
+    return [{
+      emotion, human, ai,
+      delta: distance(humanCentroid, aiCentroid),
+      p: exactVectorPermutationP([...human.map(item => item.centroid), ...ai.map(item => item.centroid)], human.length),
+    }];
+  });
+  const finiteP = raw.map(item => item.p).filter(Number.isFinite), adjusted = bh(finiteP);
+  let pIndex = 0;
+  const rows: ExportRow[] = raw.map(item => {
+    const q = Number.isFinite(item.p) ? adjusted[pIndex++] : NaN;
+    return {
+      情绪: item.emotion,
+      人类来源数: item.human.length,
+      AI来源数: item.ai.length,
+      人类样本数: item.human.reduce((sum, group) => sum + group.n, 0),
+      AI样本数: item.ai.reduce((sum, group) => sum + group.n, 0),
+      人类_AI来源质心ΔE76: round(item.delta, 5),
+      精确置换p值: Number.isFinite(item.p) ? round(item.p, 6) : null,
+      FDR_q值: Number.isFinite(q) ? round(q, 6) : null,
+      FDR显著: Number.isFinite(q) ? q < .05 : false,
+    };
+  });
+  return { id: "task1-cohort-test", title: "人类–AI来源级精确比较", kind: "statistics", rows, summary: [{ label: "情绪", value: String(rows.length) }, { label: "分析单位", value: "来源质心" }, { label: "多重校正", value: "BH-FDR" }], note: "先把每个来源在每个情绪的样本汇总为一个 Lab 质心，再以来源为独立分析单位执行人类/AI标签的双侧精确置换检验。4个人类组+4个AI组时穷举全部70种分组，避免把同一来源内重复回答误当独立样本。" };
+}
+
 export function runCulturalBias(colors: CanonicalColorRow[]): AnalysisResult {
   const sources = [...new Set(colors.map(row => row.source))], emotions = [...new Set(colors.map(row => row.emotion))]; const rows: ExportRow[] = [];
   emotions.forEach(emotion => sources.forEach((target, targetIndex) => {
     const references = sources.filter((_, index) => index !== targetIndex);
-    for (let i = 0; i < references.length; i += 1) for (let j = 0; j < references.length; j += 1) {
-      if (i === j) continue;
+    for (let i = 0; i < references.length; i += 1) for (let j = i + 1; j < references.length; j += 1) {
       const referenceA = references[i], referenceB = references[j];
       const targetRows = colors.filter(row => row.source === target && row.emotion === emotion);
       const aRows = colors.filter(row => row.source === referenceA && row.emotion === emotion);
@@ -346,7 +627,7 @@ export function runCulturalBias(colors: CanonicalColorRow[]): AnalysisResult {
 
 function normalizeEmotion(value: string) { const exact = GEW_EMOTIONS.find(emotion => emotion.toLowerCase() === value.trim().toLowerCase()); return exact || value.trim(); }
 function associations(value: CellValue): Array<{ emotion: string; intensity: number }> | null {
-  if (value == null || text(value) === "") return [];
+  if (value == null || text(value) === "") return null;
   let parsed: unknown = value;
   if (typeof value === "string") { try { parsed = JSON.parse(value); } catch { return null; } }
   const candidate = parsed && typeof parsed === "object" && !Array.isArray(parsed) && "associations" in parsed ? (parsed as { associations: unknown }).associations : parsed;
@@ -355,22 +636,66 @@ function associations(value: CellValue): Array<{ emotion: string; intensity: num
   return null;
 }
 
+export type RowQuality = {
+  row: number;
+  task1ValidColors: number;
+  task1ExpectedColors: number;
+  task2PresentCells: number;
+  task2ValidCells: number;
+  task2ExpectedCells: number;
+  related: boolean;
+  completeTask1: boolean;
+  completeTask2: boolean;
+};
+
+export function inspectRowQuality(rows: DataRow[], columns: string[]): RowQuality[] {
+  const detection = detectDataset(rows, columns);
+  const task1ExpectedColors = detection.schema === "task1-long"
+    ? 1
+    : new Set(columns.map(column => column.match(/^color_data\.(.+)\.(?:h|s|l|hex)$/i)?.[1]).filter(Boolean)).size;
+  const gewColumns = columns.filter(column => {
+    const match = column.match(/^word_data\.(.+)$/i);
+    return match ? GEW_COLOURS.includes(match[1] as typeof GEW_COLOURS[number]) : false;
+  });
+  return rows.map((raw, index) => {
+    const parsedColor = parseColorRows([raw], columns, detection.schema);
+    const task2PresentCells = gewColumns.filter(column => text(raw[column]) !== "").length;
+    const task2ValidCells = gewColumns.filter(column => text(raw[column]) !== "" && associations(raw[column]) !== null).length;
+    const task1ValidColors = parsedColor.rows.length;
+    return {
+      row: index + 1,
+      task1ValidColors,
+      task1ExpectedColors,
+      task2PresentCells,
+      task2ValidCells,
+      task2ExpectedCells: gewColumns.length,
+      related: task1ValidColors > 0 || task2PresentCells > 0,
+      completeTask1: task1ExpectedColors > 0 && task1ValidColors >= task1ExpectedColors,
+      completeTask2: gewColumns.length > 0 && task2ValidCells >= gewColumns.length,
+    };
+  });
+}
+
 export function parseGewRows(rows: DataRow[], columns: string[]): { rows: GewRow[]; sourceRows: number; invalidCells: number } {
   const gewColumns = columns.filter(column => {
     const match = column.match(/^word_data\.(.+)$/i);
     return match ? GEW_COLOURS.includes(match[1] as typeof GEW_COLOURS[number]) : false;
-  }); const sourceColumn = findColumn(columns, ALIASES.source); const participantColumn = findColumn(columns, ALIASES.participant); const runColumn = findColumn(columns, ALIASES.run);
-  const result: GewRow[] = []; let invalidCells = 0;
-  rows.forEach((raw, rowIndex) => gewColumns.forEach(column => {
+  }); const sourceColumn = findColumn(columns, ALIASES.source); const participantColumn = findColumn(columns, ALIASES.participant); const runColumn = findColumn(columns, ALIASES.run); const cohortColumn = findColumn(columns, ALIASES.cohort);
+  const result: GewRow[] = []; let invalidCells = 0, sourceRows = 0;
+  rows.forEach((raw, rowIndex) => {
+    if (!gewColumns.some(column => text(raw[column]) !== "")) return;
+    sourceRows += 1;
+    gewColumns.forEach(column => {
     const color = column.replace(/^word_data\./i, ""); const parsed = associations(raw[column]); const valid = parsed !== null;
     if (!valid) invalidCells += 1;
     const map = new Map((parsed || []).filter(item => GEW_EMOTIONS.includes(item.emotion as typeof GEW_EMOTIONS[number]) && Number.isFinite(item.intensity)).map(item => [item.emotion, clamp(item.intensity, 0, 5)]));
-    GEW_EMOTIONS.forEach(emotion => { const intensity = map.get(emotion) || 0; result.push({ participant: text(participantColumn ? raw[participantColumn] : null, String(rowIndex + 1)), source: text(sourceColumn ? raw[sourceColumn] : null, "未分组"), run: text(runColumn ? raw[runColumn] : null, String(rowIndex + 1)), color, emotion, selected: intensity > 0 ? 1 : 0, intensity, valid }); });
-  }));
-  return { rows: result, sourceRows: rows.length, invalidCells };
+    GEW_EMOTIONS.forEach(emotion => { const intensity = map.get(emotion) || 0; result.push({ participant: text(participantColumn ? raw[participantColumn] : null, String(rowIndex + 1)), source: text(sourceColumn ? raw[sourceColumn] : null, "未分组"), cohort: normalizeCohort(cohortColumn ? raw[cohortColumn] : null), run: text(runColumn ? raw[runColumn] : null, String(rowIndex + 1)), color, emotion, selected: intensity > 0 ? 1 : 0, intensity, valid }); });
+    });
+  });
+  return { rows: result, sourceRows, invalidCells };
 }
 
-export function gewRowsToExport(rows: GewRow[]): ExportRow[] { return rows.map(row => ({ 样本ID: row.participant, 来源: row.source, 轮次: row.run, 颜色: row.color, 情绪: row.emotion, 是否选择: row.selected, 强度: row.intensity, 原始单元格有效: row.valid })); }
+export function gewRowsToExport(rows: GewRow[]): ExportRow[] { return rows.map(row => ({ 样本ID: row.participant, 来源: row.source, 组类型: row.cohort, 轮次: row.run, 颜色: row.color, 情绪: row.emotion, 是否选择: row.selected, 强度: row.intensity, 原始单元格有效: row.valid })); }
 
 export function runGewQc(parsed: ReturnType<typeof parseGewRows>): AnalysisResult {
   const combinations = new Set(parsed.rows.map(row => `${row.source}\u0000${row.color}`)).size;
@@ -378,14 +703,46 @@ export function runGewQc(parsed: ReturnType<typeof parseGewRows>): AnalysisResul
 }
 
 export function runGewDescriptive(rows: GewRow[]): AnalysisResult {
-  const groups = summarizeGew(rows);
+  const validRows = rows.filter(row => row.valid), groups = summarizeGew(validRows);
   const output = [...groups.entries()].map(([key, group]) => { const [source, color, emotion] = key.split("\u0000"); return { 来源: source, 颜色: color, 情绪: emotion, N: group.n, 选择次数: group.yes, 选择率: round(group.yes / Math.max(1, group.n)), 平均强度_全部: round(group.intensity / Math.max(1, group.n)), 平均强度_已选择: round(group.selectedIntensity / Math.max(1, group.yes)), 价性: VALENCE[emotion] > 0 ? "积极" : "消极" }; });
-  return { id: "task2-descriptive", title: "选择率、强度与价性", kind: "statistics", rows: output, summary: [{ label: "来源", value: String(new Set(rows.map(row => row.source)).size) }, { label: "颜色", value: String(new Set(rows.map(row => row.color)).size) }, { label: "统计单元", value: String(output.length) }] };
+  return { id: "task2-descriptive", title: "选择率、强度与价性", kind: "statistics", rows: output, summary: [{ label: "来源", value: String(new Set(validRows.map(row => row.source)).size) }, { label: "颜色", value: String(new Set(validRows.map(row => row.color)).size) }, { label: "统计单元", value: String(output.length) }] };
 }
 
 function erf(x: number) { const sign = x < 0 ? -1 : 1; x = Math.abs(x); const a1=.254829592,a2=-.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=.3275911; const t=1/(1+p*x); return sign*(1-(((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t)*Math.exp(-x*x)); }
 function chiSquare2x2(a: number, b: number, c: number, d: number) { const n=a+b+c+d; const denominator=(a+b)*(c+d)*(a+c)*(b+d); return denominator ? n*(a*d-b*c)**2/denominator : 0; }
 function bh(values: number[]) { const indexed=values.map((value,index)=>({value,index})).sort((a,b)=>a.value-b.value); const adjusted=new Array(values.length).fill(1); let previous=1; for(let i=indexed.length-1;i>=0;i-=1){ previous=Math.min(previous,indexed[i].value*indexed.length/(i+1)); adjusted[indexed[i].index]=previous; } return adjusted; }
+function logGamma(value: number): number {
+  const coefficients = [676.5203681218851,-1259.1392167224028,771.32342877765313,-176.61502916214059,12.507343278686905,-.13857109526572012,9.9843695780195716e-6,1.5056327351493116e-7];
+  if (value < .5) return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * value)) - logGamma(1 - value);
+  let x = .99999999999980993; const z = value - 1;
+  coefficients.forEach((coefficient, index) => { x += coefficient / (z + index + 1); });
+  const t = z + coefficients.length - .5;
+  return .5 * Math.log(2 * Math.PI) + (z + .5) * Math.log(t) - t + Math.log(x);
+}
+function regularizedGammaQ(shape: number, value: number) {
+  if (!(shape > 0) || value < 0) return NaN;
+  if (value === 0) return 1;
+  const epsilon = 1e-14, tiny = 1e-300, maxIterations = 200;
+  if (value < shape + 1) {
+    let term = 1 / shape, sum = term;
+    for (let n = 1; n <= maxIterations; n += 1) {
+      term *= value / (shape + n); sum += term;
+      if (Math.abs(term) < Math.abs(sum) * epsilon) break;
+    }
+    const p = sum * Math.exp(-value + shape * Math.log(value) - logGamma(shape));
+    return clamp(1 - p);
+  }
+  let b = value + 1 - shape, c = 1 / tiny, d = 1 / Math.max(tiny, b), h = d;
+  for (let i = 1; i <= maxIterations; i += 1) {
+    const an = -i * (i - shape); b += 2; d = an * d + b; if (Math.abs(d) < tiny) d = tiny;
+    c = b + an / c; if (Math.abs(c) < tiny) c = tiny; d = 1 / d;
+    const delta = d * c; h *= delta; if (Math.abs(delta - 1) < epsilon) break;
+  }
+  return clamp(Math.exp(-value + shape * Math.log(value) - logGamma(shape)) * h);
+}
+function chiSquareSurvival(chiSquare: number, degreesOfFreedom: number) {
+  return regularizedGammaQ(degreesOfFreedom / 2, Math.max(0, chiSquare) / 2);
+}
 function summarizeGew(rows: GewRow[]) {
   const groups = new Map<string, { n: number; yes: number; intensity: number; selectedIntensity: number }>();
   rows.forEach(row => { const key = `${row.source}\u0000${row.color}\u0000${row.emotion}`; const current = groups.get(key) || { n: 0, yes: 0, intensity: 0, selectedIntensity: 0 }; current.n += 1; current.yes += row.selected; current.intensity += row.intensity; if (row.selected) current.selectedIntensity += row.intensity; groups.set(key, current); });
@@ -393,21 +750,108 @@ function summarizeGew(rows: GewRow[]) {
 }
 
 export function runGewOmnibus(rows: GewRow[]): AnalysisResult {
-  const sources=[...new Set(rows.map(row=>row.source))], counts=summarizeGew(rows); const keys=[...new Set(rows.map(row=>`${row.color}\u0000${row.emotion}`))];
-  const raw=keys.map(key=>{ const [color,emotion]=key.split("\u0000"); const groups=sources.map(source=>{ const group=counts.get(`${source}\u0000${color}\u0000${emotion}`) || {n:0,yes:0}; return {source,yes:group.yes,no:group.n-group.yes}; }); const totalYes=groups.reduce((s,g)=>s+g.yes,0), total=groups.reduce((s,g)=>s+g.yes+g.no,0); let chi=0; groups.forEach(group=>{ const n=group.yes+group.no, ey=n*totalYes/Math.max(1,total), en=n*(total-totalYes)/Math.max(1,total); if(ey)chi+=(group.yes-ey)**2/ey;if(en)chi+=(group.no-en)**2/en; }); const df=Math.max(1,sources.length-1); const p=df===2?Math.exp(-chi/2):1-erf(Math.sqrt(chi/2)); return {color,emotion,chi,p,df}; });
-  const adjusted=bh(raw.map(row=>row.p)); const output=raw.map((row,index)=>({颜色:row.color,情绪:row.emotion,来源数:sources.length,卡方:round(row.chi,4),自由度:row.df,p值:round(row.p,6),FDR_q值:round(adjusted[index],6),显著:adjusted[index]<.05}));
-  return { id:"task2-omnibus", title:"来源间总体差异检验", kind:"statistics", rows:output, summary:[{label:"检验数",value:String(output.length)},{label:"FDR<.05",value:String(output.filter(row=>row.显著).length)},{label:"来源",value:String(sources.length)}], note:"对选择率执行 Pearson 卡方检验，并用 Benjamini–Hochberg 方法控制多重比较。" };
+  rows=rows.filter(row=>row.valid); const sources=[...new Set(rows.map(row=>row.source))], counts=summarizeGew(rows); const keys=[...new Set(rows.map(row=>`${row.color}\u0000${row.emotion}`))];
+  const raw=keys.map(key=>{ const [color,emotion]=key.split("\u0000"); const groups=sources.map(source=>{ const group=counts.get(`${source}\u0000${color}\u0000${emotion}`) || {n:0,yes:0}; return {source,yes:group.yes,no:group.n-group.yes}; }).filter(group=>group.yes+group.no>0); const totalYes=groups.reduce((s,g)=>s+g.yes,0), total=groups.reduce((s,g)=>s+g.yes+g.no,0); let chi=0,minExpected=Infinity; groups.forEach(group=>{ const n=group.yes+group.no, ey=n*totalYes/Math.max(1,total), en=n*(total-totalYes)/Math.max(1,total); minExpected=Math.min(minExpected,ey,en);if(ey)chi+=(group.yes-ey)**2/ey;if(en)chi+=(group.no-en)**2/en; }); const df=Math.max(1,groups.length-1),p=groups.length>1?chiSquareSurvival(chi,df):1; return {color,emotion,chi,p,df,minExpected,sourceCount:groups.length,total}; });
+  const adjusted=bh(raw.map(row=>row.p)); const output=raw.map((row,index)=>({颜色:row.color,情绪:row.emotion,来源数:row.sourceCount,卡方:round(row.chi,4),自由度:row.df,Cramér_V:round(Math.sqrt(row.chi/Math.max(1,row.total)),6),最小期望频数:Number.isFinite(row.minExpected)?round(row.minExpected,3):null,卡方近似可靠:row.minExpected>=5,p值:round(row.p,6),FDR_q值:round(adjusted[index],6),显著:adjusted[index]<.05}));
+  return { id:"task2-omnibus", title:"来源间总体差异检验", kind:"statistics", rows:output, summary:[{label:"检验数",value:String(output.length)},{label:"FDR<.05",value:String(output.filter(row=>row.显著).length)},{label:"来源",value:String(sources.length)}], note:"对选择率执行 Pearson 卡方检验，按实际自由度计算卡方分布右尾概率，并用 Benjamini–Hochberg 方法控制多重比较；最小期望频数 <5 的单元应改用置换/精确检验复核。" };
 }
 
 export function runGewPairwise(rows: GewRow[]): AnalysisResult {
-  const sources=[...new Set(rows.map(row=>row.source))], keys=[...new Set(rows.map(row=>`${row.color}\u0000${row.emotion}`))], counts=summarizeGew(rows); const raw:Array<{color:string;emotion:string;a:string;b:string;rateA:number;rateB:number;chi:number;p:number}>=[];
-  keys.forEach(key=>{const[color,emotion]=key.split("\u0000");sources.forEach((a,ai)=>sources.slice(ai+1).forEach(b=>{const ga=counts.get(`${a}\u0000${color}\u0000${emotion}`)||{n:0,yes:0},gb=counts.get(`${b}\u0000${color}\u0000${emotion}`)||{n:0,yes:0};const chi=chiSquare2x2(ga.yes,ga.n-ga.yes,gb.yes,gb.n-gb.yes),p=1-erf(Math.sqrt(chi/2));raw.push({color,emotion,a,b,rateA:ga.yes/Math.max(1,ga.n),rateB:gb.yes/Math.max(1,gb.n),chi,p});}));});
-  const adjusted=bh(raw.map(row=>row.p)); const output=raw.map((row,index)=>({颜色:row.color,情绪:row.emotion,来源A:row.a,来源B:row.b,A选择率:round(row.rateA),B选择率:round(row.rateB),选择率差:round(row.rateA-row.rateB),卡方:round(row.chi,4),p值:round(row.p,6),FDR_q值:round(adjusted[index],6),显著:adjusted[index]<.05}));
+  rows=rows.filter(row=>row.valid); const sources=[...new Set(rows.map(row=>row.source))], keys=[...new Set(rows.map(row=>`${row.color}\u0000${row.emotion}`))], counts=summarizeGew(rows); const raw:Array<{color:string;emotion:string;a:string;b:string;rateA:number;rateB:number;chi:number;p:number;oddsRatio:number;ciLow:number;ciHigh:number;phi:number}>=[];
+  keys.forEach(key=>{const[color,emotion]=key.split("\u0000");sources.forEach((a,ai)=>sources.slice(ai+1).forEach(b=>{const ga=counts.get(`${a}\u0000${color}\u0000${emotion}`)||{n:0,yes:0},gb=counts.get(`${b}\u0000${color}\u0000${emotion}`)||{n:0,yes:0};const noA=ga.n-ga.yes,noB=gb.n-gb.yes,chi=chiSquare2x2(ga.yes,noA,gb.yes,noB),p=1-erf(Math.sqrt(chi/2));const aa=ga.yes+.5,bb=noA+.5,cc=gb.yes+.5,dd=noB+.5,oddsRatio=aa*dd/(bb*cc),se=Math.sqrt(1/aa+1/bb+1/cc+1/dd);raw.push({color,emotion,a,b,rateA:ga.yes/Math.max(1,ga.n),rateB:gb.yes/Math.max(1,gb.n),chi,p,oddsRatio,ciLow:Math.exp(Math.log(oddsRatio)-1.96*se),ciHigh:Math.exp(Math.log(oddsRatio)+1.96*se),phi:Math.sqrt(chi/Math.max(1,ga.n+gb.n))});}));});
+  const adjusted=bh(raw.map(row=>row.p)); const output=raw.map((row,index)=>({颜色:row.color,情绪:row.emotion,来源A:row.a,来源B:row.b,A选择率:round(row.rateA),B选择率:round(row.rateB),选择率差:round(row.rateA-row.rateB),优势比_OR:round(row.oddsRatio,5),OR_95CI下限:round(row.ciLow,5),OR_95CI上限:round(row.ciHigh,5),Phi效应量:round(row.phi,5),卡方:round(row.chi,4),p值:round(row.p,6),FDR_q值:round(adjusted[index],6),显著:adjusted[index]<.05}));
   return {id:"task2-pairwise",title:"来源两两差异",kind:"statistics",rows:output,summary:[{label:"两两检验",value:String(output.length)},{label:"FDR<.05",value:String(output.filter(row=>row.显著).length)},{label:"来源对",value:String(sources.length*(sources.length-1)/2)}],note:"每个颜色×情绪执行来源两两 2×2 卡方检验，并统一进行 FDR 校正。"};
 }
 
 function jsd(p:number[],q:number[]){const sumP=p.reduce((s,v)=>s+v,0)||1,sumQ=q.reduce((s,v)=>s+v,0)||1;const pp=p.map(v=>v/sumP),qq=q.map(v=>v/sumQ),m=pp.map((v,i)=>(v+qq[i])/2);const kl=(a:number[],b:number[])=>a.reduce((s,v,i)=>s+(v? v*Math.log2(v/b[i]):0),0);return (kl(pp,m)+kl(qq,m))/2;}
-export function runGewJsd(rows:GewRow[]):AnalysisResult{const sources=[...new Set(rows.map(row=>row.source))],colors=[...new Set(rows.map(row=>row.color))],counts=summarizeGew(rows),output:ExportRow[]=[];colors.forEach(color=>sources.forEach((a,ai)=>sources.slice(ai+1).forEach(b=>{const vector=(source:string)=>GEW_EMOTIONS.map(emotion=>{const group=counts.get(`${source}\u0000${color}\u0000${emotion}`)||{n:0,yes:0};return group.yes/Math.max(1,group.n);});output.push({颜色:color,来源A:a,来源B:b,Jensen_Shannon距离:round(Math.sqrt(jsd(vector(a),vector(b))),6)});})));return{id:"task2-jsd",title:"情绪分布距离",kind:"matrix",rows:output,summary:[{label:"来源对×颜色",value:String(output.length)},{label:"颜色",value:String(colors.length)},{label:"距离范围",value:"0–1"}],note:"基于 20 个情绪的选择率向量计算 Jensen–Shannon 距离；越大表示分布差异越明显。"};}
+export function runGewJsd(rows:GewRow[]):AnalysisResult{rows=rows.filter(row=>row.valid);const sources=[...new Set(rows.map(row=>row.source))],colors=[...new Set(rows.map(row=>row.color))],counts=summarizeGew(rows),output:ExportRow[]=[];colors.forEach(color=>sources.forEach((a,ai)=>sources.slice(ai+1).forEach(b=>{const vector=(source:string)=>GEW_EMOTIONS.map(emotion=>{const group=counts.get(`${source}\u0000${color}\u0000${emotion}`)||{n:0,yes:0};return group.yes/Math.max(1,group.n);});output.push({颜色:color,来源A:a,来源B:b,Jensen_Shannon距离:round(Math.sqrt(jsd(vector(a),vector(b))),6)});})));return{id:"task2-jsd",title:"情绪分布距离",kind:"matrix",rows:output,summary:[{label:"来源对×颜色",value:String(output.length)},{label:"颜色",value:String(colors.length)},{label:"距离范围",value:"0–1"}],note:"基于 20 个情绪的选择率向量计算 Jensen–Shannon 距离；越大表示分布差异越明显。"};}
+
+export function runGewValenceProfile(rows: GewRow[]): AnalysisResult {
+  rows = rows.filter(row => row.valid);
+  const keys = [...new Set(rows.map(row => `${row.source}\u0000${row.color}`))];
+  const output: ExportRow[] = keys.map(key => {
+    const [source, color] = key.split("\u0000"), group = rows.filter(row => row.source === source && row.color === color);
+    const positive = group.filter(row => VALENCE[row.emotion] > 0), negative = group.filter(row => VALENCE[row.emotion] < 0);
+    const summarize = (items: GewRow[]) => ({ rate: items.reduce((sum, row) => sum + row.selected, 0) / Math.max(1, items.length), intensity: items.reduce((sum, row) => sum + row.intensity, 0) / Math.max(1, items.length) });
+    const pos = summarize(positive), neg = summarize(negative);
+    return { 来源: source, 组类型: group[0]?.cohort || "unspecified", 颜色: color, 积极情绪选择率: round(pos.rate, 6), 消极情绪选择率: round(neg.rate, 6), 价性选择差_积极减消极: round(pos.rate - neg.rate, 6), 积极情绪平均强度: round(pos.intensity, 6), 消极情绪平均强度: round(neg.intensity, 6), 价性强度差_积极减消极: round(pos.intensity - neg.intensity, 6) };
+  });
+  return { id: "task2-valence", title: "积极–消极价性结构", kind: "statistics", rows: output, summary: [{ label: "来源×颜色", value: String(output.length) }, { label: "积极情绪", value: "10" }, { label: "消极情绪", value: "10" }], note: "按 GEW 的前 10 个积极、后 10 个消极情绪汇总选择率与强度，适合检查人类与 AI 的总体价性偏移。" };
+}
+
+export function runGewConcentration(rows: GewRow[]): AnalysisResult {
+  rows = rows.filter(row => row.valid);
+  const counts = summarizeGew(rows), sources = [...new Set(rows.map(row => row.source))], colors = [...new Set(rows.map(row => row.color))], output: ExportRow[] = [];
+  sources.forEach(source => colors.forEach(color => {
+    const rates = GEW_EMOTIONS.map(emotion => { const group = counts.get(`${source}\u0000${color}\u0000${emotion}`) || { n: 0, yes: 0 }; return group.yes / Math.max(1, group.n); });
+    const total = rates.reduce((sum, value) => sum + value, 0);
+    if (!total) return;
+    const probabilities = rates.map(value => value / total), entropy = probabilities.reduce((sum, value) => value ? sum - value * Math.log2(value) : sum, 0);
+    const topIndex = rates.reduce((best, value, index) => value > rates[best] ? index : best, 0);
+    const sourceRows = rows.filter(row => row.source === source && row.color === color);
+    output.push({ 来源: source, 组类型: sourceRows[0]?.cohort || "unspecified", 颜色: color, Shannon熵: round(entropy, 6), 有效情绪数: round(2 ** entropy, 5), 归一化多样性: round(entropy / Math.log2(GEW_EMOTIONS.length), 6), 最高选择情绪: GEW_EMOTIONS[topIndex], 最高情绪选择率: round(rates[topIndex], 6), 最高情绪份额: round(probabilities[topIndex], 6) });
+  }));
+  return { id: "task2-concentration", title: "情绪集中度与多样性", kind: "statistics", rows: output, summary: [{ label: "来源×颜色", value: String(output.length) }, { label: "有效情绪范围", value: "1–20" }, { label: "输入", value: "选择率分布" }], note: "Shannon 熵与有效情绪数刻画一个颜色引发的情绪分布是集中还是分散，可检验 AI 是否比人类呈现更刻板的少数情绪。" };
+}
+
+function pearson(a: number[], b: number[]) {
+  const meanA = a.reduce((sum, value) => sum + value, 0) / Math.max(1, a.length), meanB = b.reduce((sum, value) => sum + value, 0) / Math.max(1, b.length);
+  const numerator = a.reduce((sum, value, index) => sum + (value - meanA) * (b[index] - meanB), 0);
+  const denominator = Math.sqrt(a.reduce((sum, value) => sum + (value - meanA) ** 2, 0) * b.reduce((sum, value) => sum + (value - meanB) ** 2, 0));
+  return denominator ? numerator / denominator : 0;
+}
+
+export function runHumanAiGewAlignment(rows: GewRow[]): AnalysisResult {
+  rows = rows.filter(row => row.valid);
+  const counts = summarizeGew(rows), humanSources = [...new Set(rows.filter(row => row.cohort === "human").map(row => row.source))], aiSources = [...new Set(rows.filter(row => row.cohort === "ai").map(row => row.source))], colors = [...new Set(rows.map(row => row.color))], output: ExportRow[] = [];
+  const vector = (source: string, color: string) => GEW_EMOTIONS.map(emotion => { const group = counts.get(`${source}\u0000${color}\u0000${emotion}`) || { n: 0, yes: 0 }; return group.yes / Math.max(1, group.n); });
+  aiSources.forEach(aiSource => colors.forEach(color => {
+    const aiVector = vector(aiSource, color);
+    const comparisons = humanSources.map(humanSource => {
+      const humanVector = vector(humanSource, color);
+      return { humanSource, jsDistance: Math.sqrt(jsd(aiVector, humanVector)), correlation: pearson(aiVector, humanVector) };
+    }).sort((a, b) => a.jsDistance - b.jsDistance);
+    if (!comparisons.length) return;
+    output.push({ AI来源: aiSource, 颜色: color, 最近人类组: comparisons[0].humanSource, 最近人类组JSD: round(comparisons[0].jsDistance, 6), 选择率Pearson相关: round(comparisons[0].correlation, 6), 人类组平均JSD: round(comparisons.reduce((sum, item) => sum + item.jsDistance, 0) / comparisons.length, 6) });
+  }));
+  return { id: "task2-human-ai", title: "人类–AI情绪轮对齐", kind: "statistics", rows: output, summary: [{ label: "人类组", value: String(humanSources.length) }, { label: "AI组", value: String(aiSources.length) }, { label: "AI×颜色", value: String(output.length) }], note: "同时报告 JSD（分布距离）与 Pearson 相关（轮廓相似度），避免仅用单一指标判断 AI 与哪一组人类更接近。" };
+}
+
+export function runHumanAiGewCohortTest(rows: GewRow[]): AnalysisResult {
+  rows = rows.filter(row => row.valid && row.cohort !== "unspecified");
+  const counts = summarizeGew(rows), colors = [...new Set(rows.map(row => row.color))], outputRaw: Array<{
+    color: string; emotion: string; human: Array<{ source: string; rate: number; intensity: number; n: number }>; ai: Array<{ source: string; rate: number; intensity: number; n: number }>;
+    rateDifference: number; intensityDifference: number; rateP: number; intensityP: number;
+  }> = [];
+  colors.forEach(color => GEW_EMOTIONS.forEach(emotion => {
+    const sourceRows = [...new Set(rows.filter(row => row.color === color && row.emotion === emotion).map(row => `${row.cohort}\u0000${row.source}`))].map(key => {
+      const [cohort, source] = key.split("\u0000"), group = counts.get(`${source}\u0000${color}\u0000${emotion}`);
+      return group && group.n ? { cohort, source, n: group.n, rate: group.yes / group.n, intensity: group.intensity / group.n } : null;
+    }).filter((item): item is { cohort: string; source: string; n: number; rate: number; intensity: number } => Boolean(item));
+    const human = sourceRows.filter(item => item.cohort === "human"), ai = sourceRows.filter(item => item.cohort === "ai");
+    if (!human.length || !ai.length) return;
+    const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+    const rates = [...human.map(item => item.rate), ...ai.map(item => item.rate)], intensities = [...human.map(item => item.intensity), ...ai.map(item => item.intensity)];
+    outputRaw.push({
+      color, emotion, human, ai,
+      rateDifference: mean(ai.map(item => item.rate)) - mean(human.map(item => item.rate)),
+      intensityDifference: mean(ai.map(item => item.intensity)) - mean(human.map(item => item.intensity)),
+      rateP: exactScalarPermutationP(rates, human.length),
+      intensityP: exactScalarPermutationP(intensities, human.length),
+    });
+  }));
+  const rateAdjusted = bh(outputRaw.map(item => item.rateP).filter(Number.isFinite)), intensityAdjusted = bh(outputRaw.map(item => item.intensityP).filter(Number.isFinite));
+  let rateIndex = 0, intensityIndex = 0;
+  const output: ExportRow[] = outputRaw.map(item => {
+    const rateQ = Number.isFinite(item.rateP) ? rateAdjusted[rateIndex++] : NaN, intensityQ = Number.isFinite(item.intensityP) ? intensityAdjusted[intensityIndex++] : NaN;
+    return {
+      颜色: item.color, 情绪: item.emotion, 人类来源数: item.human.length, AI来源数: item.ai.length,
+      AI减人类_来源平均选择率差: round(item.rateDifference, 6), 选择率精确置换p值: Number.isFinite(item.rateP) ? round(item.rateP, 6) : null, 选择率FDR_q值: Number.isFinite(rateQ) ? round(rateQ, 6) : null,
+      AI减人类_来源平均强度差: round(item.intensityDifference, 6), 强度精确置换p值: Number.isFinite(item.intensityP) ? round(item.intensityP, 6) : null, 强度FDR_q值: Number.isFinite(intensityQ) ? round(intensityQ, 6) : null,
+    };
+  });
+  return { id: "task2-cohort-test", title: "人类–AI情绪轮来源级精确比较", kind: "statistics", rows: output, summary: [{ label: "颜色×情绪", value: String(output.length) }, { label: "分析单位", value: "来源" }, { label: "多重校正", value: "BH-FDR" }], note: "先在每个来源内计算颜色×情绪的选择率与平均强度，再以来源为独立单位进行人类/AI双侧精确置换检验。4+4来源时每项穷举70种标签分配；选择率和强度分别进行BH-FDR校正。" };
+}
 
 export function toCsv(rows: ExportRow[]) {
   if (!rows.length) return ""; const columns=[...new Set(rows.flatMap(row=>Object.keys(row)))]; const escape=(value:unknown)=>{const string=value==null?"":String(value);return /[",\n]/.test(string)?`"${string.replaceAll('"','""')}"`:string;}; return `\uFEFF${columns.map(escape).join(",")}\n${rows.map(row=>columns.map(column=>escape(row[column])).join(",")).join("\n")}`;
