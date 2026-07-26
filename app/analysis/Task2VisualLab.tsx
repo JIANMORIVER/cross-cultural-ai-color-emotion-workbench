@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useRef, useState } from "react";
-import { GEW_EMOTIONS, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
+import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
 
 type GewMetric = "probability" | "conditional" | "overall";
 type GewCell = {
@@ -110,6 +110,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew" }: Task2VisualLabP
   const sources = useMemo(() => [...new Set(cells.map(cell => cell.source))], [cells]);
   const colors = useMemo(() => [...new Set(cells.map(cell => cell.color))], [cells]);
   const [heatSource, setHeatSource] = useState(""), [profileSource, setProfileSource] = useState(""), [profileColor, setProfileColor] = useState("");
+  const [displayMetric, setDisplayMetric] = useState<GewMetric>("probability");
   const [profileMetric, setProfileMetric] = useState<GewMetric>("overall"), [differenceA, setDifferenceA] = useState(""), [differenceB, setDifferenceB] = useState("");
   const [differenceMetric, setDifferenceMetric] = useState<GewMetric>("overall");
   const labRef = useRef<HTMLDivElement>(null);
@@ -124,15 +125,19 @@ export function Task2VisualLab({ data, fileName = "task2-gew" }: Task2VisualLabP
     <div className="visual-lab-head"><div><span className="eyebrow">GEW 关系结构精选视图</span><h3>颜色 × 情绪关联画像</h3><p>当前筛选 {cells.length.toLocaleString()} 个统计单元 · {sources.length} 个来源 · {colors.length} 种颜色</p></div><div className="visual-export"><button className="secondary" disabled={!cells.length} onClick={() => download(`${safeName}_gew-visual-data.csv`, toCsv(exportRows(cells)))}>导出描述数据 CSV</button><button className="primary" disabled={!cells.length} onClick={() => labRef.current && void downloadPng(labRef.current, `${safeName}_gew-visual-panel.png`)}>导出面板 PNG</button></div></div>
     {!cells.length ? <div className="task2-visual-empty"><span>◎</span><b>当前筛选没有可绘制的 GEW 数据</b><small>请保留来源、颜色、情绪、选择与强度字段。</small></div> : <>
       <article className="gew-view-block">
-        <ViewHead index="01" code="HURDLE MODEL" title="关联概率与条件强度" note="先区分“是否建立关联”，再观察建立关联后的强弱；两张图采用相同颜色与 GEW 情绪顺序。"><label>来源<select value={effectiveHeat} onChange={event => setHeatSource(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label></ViewHead>
+        <ViewHead index="01" code="DIRECT DISPLAY" title="颜色—情绪气泡点阵分面" note="每个来源一张同尺度点阵；横轴为 20 个情绪，纵轴为 11 个标准色，圆点大小直接对应当前指标。"><MetricSelect value={displayMetric} onChange={setDisplayMetric} /></ViewHead>
+        <GewDotFacets metric={displayMetric} sources={sources} colors={colors} cells={cells} />
+      </article>
+      <article className="gew-view-block">
+        <ViewHead index="02" code="HURDLE MODEL" title="关联概率与条件强度" note="先区分“是否建立关联”，再观察建立关联后的强弱；两张图采用相同颜色与 GEW 情绪顺序。"><label>来源<select value={effectiveHeat} onChange={event => setHeatSource(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label></ViewHead>
         <div className="gew-double-heatmaps"><GewHeatmap title="A · 关联概率" note="0–100% · 选择该情绪的样本比例" metric="probability" source={effectiveHeat} colors={colors} cells={cells} /><GewHeatmap title="B · 条件强度" note="1–5 · 仅在已选择样本中计算" metric="conditional" source={effectiveHeat} colors={colors} cells={cells} /></div>
       </article>
       <article className="gew-view-block">
-        <ViewHead index="02" code="EMOTION FINGERPRINT" title="单一颜色的 20 情绪径向画像" note="维持 GEW 顺序；外扩越明显，代表该颜色与对应情绪的关联越强。"><div className="gew-inline-controls"><Select label="来源" value={effectiveProfileSource} onChange={setProfileSource} options={sources} /><Select label="颜色" value={effectiveColor} onChange={setProfileColor} options={colors} /><MetricSelect value={profileMetric} onChange={setProfileMetric} /></div></ViewHead>
+        <ViewHead index="03" code="EMOTION FINGERPRINT" title="单一颜色的 20 情绪径向画像" note="维持 GEW 顺序；外扩越明显，代表该颜色与对应情绪的关联越强。"><div className="gew-inline-controls"><Select label="来源" value={effectiveProfileSource} onChange={setProfileSource} options={sources} /><Select label="颜色" value={effectiveColor} onChange={setProfileColor} options={colors} /><MetricSelect value={profileMetric} onChange={setProfileMetric} /></div></ViewHead>
         <GewRadial source={effectiveProfileSource} color={effectiveColor} metric={profileMetric} cells={cells} sourceIndex={Math.max(0, sources.indexOf(effectiveProfileSource))} />
       </article>
       <article className="gew-view-block">
-        <ViewHead index="03" code="SOURCE CONTRAST" title="来源差值热力图" note="直接显示 A−B；正值表示来源 A 更强，负值表示来源 B 更强。"><div className="gew-inline-controls"><Select label="来源 A" value={effectiveA} onChange={setDifferenceA} options={sources} /><Select label="来源 B" value={effectiveB} onChange={setDifferenceB} options={sources.filter(source => source !== effectiveA)} /><MetricSelect value={differenceMetric} onChange={setDifferenceMetric} /></div></ViewHead>
+        <ViewHead index="04" code="SOURCE CONTRAST" title="来源差值热力图" note="直接显示 A−B；正值表示来源 A 更强，负值表示来源 B 更强。"><div className="gew-inline-controls"><Select label="来源 A" value={effectiveA} onChange={setDifferenceA} options={sources} /><Select label="来源 B" value={effectiveB} onChange={setDifferenceB} options={sources.filter(source => source !== effectiveA)} /><MetricSelect value={differenceMetric} onChange={setDifferenceMetric} /></div></ViewHead>
         {effectiveB ? <GewDifference sourceA={effectiveA} sourceB={effectiveB} metric={differenceMetric} colors={colors} cells={cells} /> : <div className="gew-comparison-empty">至少需要两个来源才能计算来源差值。</div>}
       </article>
     </>}
@@ -147,6 +152,35 @@ function Select({ label, value, onChange, options }: { label: string; value: str
 }
 function MetricSelect({ value, onChange }: { value: GewMetric; onChange: (value: GewMetric) => void }) {
   return <label>指标<select value={value} onChange={event => onChange(event.target.value as GewMetric)}>{Object.entries(METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label>;
+}
+
+function GewDotFacets({ metric, sources, colors, cells }: { metric: GewMetric; sources: string[]; colors: string[]; cells: GewCell[] }) {
+  const lookup = new Map(cells.map(cell => [keyOf(cell.source, cell.color, cell.emotion), cell]));
+  const maximum = METRICS[metric].maximum;
+  const displayEmotions = GEW_EMOTIONS.filter(emotion => cells.some(cell => cell.emotion === emotion));
+  const orderedColors = [...GEW_COLOURS.filter(code => colors.includes(code)), ...colors.filter(color => !GEW_COLOURS.includes(color as typeof GEW_COLOURS[number]))];
+  return <div className="gew-dot-display">
+    <div className="gew-dot-legend"><span>圆点大小 = {METRICS[metric].label}</span>{[.25, .5, 1].map(level => <i key={level}><em style={{ width: `${5 + Math.sqrt(level) * 16}px`, height: `${5 + Math.sqrt(level) * 16}px` }} /><b>{metric === "probability" ? `${level * 100}%` : (level * maximum).toFixed(1)}</b></i>)}<small>圆点颜色 = 标准色本身</small></div>
+    <div className="gew-dot-facets">{sources.map(source => {
+      const sourceCells = cells.filter(cell => cell.source === source), visibleValues = sourceCells.map(cell => valueOf(cell, metric)).filter((value): value is number => value !== null);
+      return <article className="gew-dot-facet" key={source}>
+        <header><h5>{source}</h5><span>{sourceCells.length} 个单元 · {visibleValues.length ? `${METRICS[metric].label}均值 ${shown(visibleValues.reduce((sum, value) => sum + value, 0) / visibleValues.length, metric)}` : "暂无数值"}</span></header>
+        <div className="gew-dot-scroll"><div className="gew-dot-matrix" style={{ gridTemplateColumns: `78px repeat(${displayEmotions.length},minmax(25px,1fr))`, minWidth: `${Math.max(220, 78 + displayEmotions.length * 27)}px` }}>
+          <span className="gew-dot-corner">颜色</span>
+          {displayEmotions.map(emotion => <b className={GEW_EMOTIONS.indexOf(emotion) === 10 ? "negative-start" : ""} key={emotion}><span>{emotion}</span></b>)}
+          {orderedColors.map(color => <Fragment key={color}>
+            <strong><i style={{ background: GEW_COLOR_HEX[color as keyof typeof GEW_COLOR_HEX] || "#94a2a5" }} />{color}</strong>
+            {displayEmotions.map(emotion => {
+              const cell = lookup.get(keyOf(source, color, emotion)), value = valueOf(cell, metric);
+              const level = value === null ? 0 : Math.min(1, Math.max(0, value / maximum));
+              const diameter = value === null ? 0 : 4 + Math.sqrt(level) * 20;
+              return <i className={`${value === null ? "missing" : level === 0 ? "zero" : ""} ${GEW_EMOTIONS.indexOf(emotion) === 10 ? "negative-start" : ""}`} key={`${color}-${emotion}`} title={`${source} · ${color} · ${emotion}\n${METRICS[metric].label}: ${shown(value, metric)}\nN=${cell?.n ?? 0}`}><em style={{ width: diameter, height: diameter, background: GEW_COLOR_HEX[color as keyof typeof GEW_COLOR_HEX] || "#5d8791" }} /></i>;
+            })}
+          </Fragment>)}
+        </div></div>
+      </article>;
+    })}</div>
+  </div>;
 }
 
 function GewHeatmap({ title, note, metric, source, colors, cells }: { title: string; note: string; metric: GewMetric; source: string; colors: string[]; cells: GewCell[] }) {

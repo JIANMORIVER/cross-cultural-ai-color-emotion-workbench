@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, type ExportRow } from "./engine";
 
-type View = "symmetry" | "asymmetry" | "scatter";
+type View = "paired" | "symmetry" | "asymmetry" | "scatter";
 
 function numberOf(row: ExportRow, key: string) {
   const value = Number(row[key]);
@@ -15,8 +15,11 @@ function average(values: number[]) { return values.length ? values.reduce((sum, 
 export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
   const sources = useMemo(() => [...new Set(rows.map(row => labelOf(row, "来源")))].filter(Boolean), [rows]);
   const [selectedSource, setSelectedSource] = useState("");
-  const [view, setView] = useState<View>("symmetry");
+  const [selectedEmotion, setSelectedEmotion] = useState("");
+  const [view, setView] = useState<View>("paired");
   const source = sources.includes(selectedSource) ? selectedSource : sources[0] || "";
+  const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => labelOf(row, "情绪") === emotion));
+  const emotion = emotions.includes(selectedEmotion as typeof GEW_EMOTIONS[number]) ? selectedEmotion : emotions[0] || "";
   const visible = rows.filter(row => labelOf(row, "来源") === source);
   const emotionRows = GEW_EMOTIONS.flatMap(emotion => {
     const row = visible.find(item => labelOf(item, "情绪") === emotion);
@@ -34,24 +37,49 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
       <div><span className="eyebrow">BIDIRECTIONAL CONSISTENCY</span><h3>双向情绪—颜色关联</h3><p>自由选色先按 CIEDE2000 映射到 11 个标准色，再与色选词的综合评分矩阵比较。</p></div>
       <label>来源<select value={source} onChange={event => setSelectedSource(event.target.value)}>{sources.map(item => <option key={item}>{item}</option>)}</select></label>
     </div>
+    <div className="visual-tabs" role="tablist" aria-label="双向一致性视图">
+      <button className={view === "paired" ? "active" : ""} onClick={() => setView("paired")}>P / Q 直接展陈</button>
+      <button className={view === "symmetry" ? "active" : ""} onClick={() => setView("symmetry")}>情绪一致性</button>
+      <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图</button>
+      <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点</button>
+    </div>
+    <div className="bidirectional-canvas">
+      {view === "paired" ? <PairedProbabilityFacets rows={rows} emotion={emotion} emotions={emotions} onEmotionChange={setSelectedEmotion} /> : null}
+      {view === "symmetry" ? <SymmetryPlot rows={emotionRows} /> : null}
+      {view === "asymmetry" ? <AsymmetryHeatmap rows={visible} /> : null}
+      {view === "scatter" ? <BidirectionalScatter rows={visible} /> : null}
+    </div>
     <div className="bidirectional-kpis">
       <article><span>平均排序一致性</span><b>{meanRank.toFixed(3)}</b><small>Spearman · −1 至 1</small></article>
       <article><span>平均分布相似度</span><b>{meanJsd.toFixed(3)}</b><small>1 − JSD · 0 至 1</small></article>
       <article><span>Top-1 相互首选</span><b>{(top1Rate * 100).toFixed(1)}%</b><small>情绪 ⇄ 标准色</small></article>
       <article><span>平均绝对非对称</span><b>{meanAsymmetry.toFixed(3)}</b><small>mean |P − Q|</small></article>
     </div>
-    <div className="visual-tabs" role="tablist" aria-label="双向一致性视图">
-      <button className={view === "symmetry" ? "active" : ""} onClick={() => setView("symmetry")}>情绪一致性</button>
-      <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图</button>
-      <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点</button>
-    </div>
-    <div className="bidirectional-canvas">
-      {view === "symmetry" ? <SymmetryPlot rows={emotionRows} /> : null}
-      {view === "asymmetry" ? <AsymmetryHeatmap rows={visible} /> : null}
-      {view === "scatter" ? <BidirectionalScatter rows={visible} /> : null}
-    </div>
     <p className="chart-note">这是来源层面的结构一致性，不是同一参与者或同一 run 的回认率。高一致性可能表示稳定关联，也可能表示 AI 更依赖少数典型关系。</p>
   </section>;
+}
+
+function PairedProbabilityFacets({ rows, emotion, emotions, onEmotionChange }: { rows: ExportRow[]; emotion: string; emotions: readonly string[]; onEmotionChange: (emotion: string) => void }) {
+  const sources = [...new Set(rows.map(row => labelOf(row, "来源")))].filter(Boolean);
+  return <div className="paired-probability-display">
+    <div className="paired-display-head"><div><span>DIRECT DISTRIBUTION</span><h4>同一情绪的双向概率色带</h4><p>P = 词选色中映射到该标准色的比例；Q = 色选词综合强度归一化后的比例。每个来源单独分面，横向同为 0–100%。</p></div><label>情绪<select value={emotion} onChange={event => onEmotionChange(event.target.value)}>{emotions.map(item => <option key={item}>{item}</option>)}</select></label></div>
+    <div className="paired-display-legend"><span><i className="p-key" />P · 词选色</span><span><i className="q-key" />Q · 色选词</span><small>色块 = 11 个实验标准色</small></div>
+    <div className="paired-source-facets">{sources.map(source => {
+      const sourceRows = rows.filter(row => labelOf(row, "来源") === source && labelOf(row, "情绪") === emotion);
+      return <article key={source}>
+        <header><h5>{source}</h5><span>{emotion} · {sourceRows.reduce((sum, row) => sum + numberOf(row, "词选色映射样本数"), 0)} 个词选色样本</span></header>
+        <div className="paired-color-grid">{GEW_COLOURS.map(code => {
+          const row = sourceRows.find(item => labelOf(item, "标准色码") === code);
+          const p = row ? numberOf(row, "词选色概率_P") : 0, q = row ? numberOf(row, "色选词归一化综合_Q") : 0;
+          return <div className="paired-color-card" key={code} title={`${source} · ${emotion} · ${code}\nP=${p.toFixed(3)}\nQ=${q.toFixed(3)}`}>
+            <div className="paired-color-name"><i style={{ background: GEW_COLOR_HEX[code] }} /><b>{code}</b><em className={p >= q ? "positive" : "negative"}>{p === q ? "P = Q" : `${p > q ? "P" : "Q"} +${Math.abs(p - q).toFixed(2)}`}</em></div>
+            <div className="paired-meter"><span>P</span><i><em className="p-bar" style={{ width: `${p * 100}%` }} /></i><strong>{(p * 100).toFixed(1)}%</strong></div>
+            <div className="paired-meter"><span>Q</span><i><em className="q-bar" style={{ width: `${q * 100}%` }} /></i><strong>{(q * 100).toFixed(1)}%</strong></div>
+          </div>;
+        })}</div>
+      </article>;
+    })}</div>
+  </div>;
 }
 
 function SymmetryPlot({ rows }: { rows: ExportRow[] }) {
