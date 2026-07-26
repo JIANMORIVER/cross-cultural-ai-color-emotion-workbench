@@ -63,6 +63,10 @@ export const GEW_EMOTIONS = [
   "Sadness", "Guilt", "Regret", "Shame", "Disappointment", "Fear", "Disgust", "Contempt", "Hate", "Anger",
 ] as const;
 export const GEW_COLOURS = ["D38", "F17", "F4", "J0", "F0", "F29", "A0", "H35", "I6", "G3", "C9"] as const;
+export const GEW_COLOR_HEX: Record<typeof GEW_COLOURS[number], string> = {
+  D38: "#F38EBB", F17: "#00904A", F4: "#DD4200", J0: "#262626", F0: "#808080",
+  F29: "#007FD3", A0: "#F2F2F2", H35: "#6F2A78", I6: "#4B2819", G3: "#BB1F23", C9: "#FFBC00",
+};
 
 export const VALENCE: Record<string, number> = Object.fromEntries(GEW_EMOTIONS.map((emotion, index) => [emotion, index < 10 ? 1 : -1]));
 const TASK1_EMOTION_ALIASES: Record<string, string> = {
@@ -242,6 +246,46 @@ function canonical(
 function rgbDeltaE(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
   const aa = rgbToLab(a.r, a.g, a.b), bb = rgbToLab(b.r, b.g, b.b);
   return Math.sqrt((aa.l - bb.l) ** 2 + (aa.a - bb.a) ** 2 + (aa.b - bb.b) ** 2);
+}
+
+export function deltaE2000(
+  first: { l: number; a: number; b: number },
+  second: { l: number; a: number; b: number },
+) {
+  const degrees = (radians: number) => radians * 180 / Math.PI;
+  const radians = (value: number) => value * Math.PI / 180;
+  const c1 = Math.hypot(first.a, first.b), c2 = Math.hypot(second.a, second.b), meanC = (c1 + c2) / 2;
+  const g = .5 * (1 - Math.sqrt(meanC ** 7 / (meanC ** 7 + 25 ** 7)));
+  const a1p = (1 + g) * first.a, a2p = (1 + g) * second.a;
+  const c1p = Math.hypot(a1p, first.b), c2p = Math.hypot(a2p, second.b);
+  const hue = (a: number, b: number) => {
+    const value = degrees(Math.atan2(b, a));
+    return value < 0 ? value + 360 : value;
+  };
+  const h1p = c1p < 1e-12 ? 0 : hue(a1p, first.b), h2p = c2p < 1e-12 ? 0 : hue(a2p, second.b);
+  const deltaL = second.l - first.l, deltaC = c2p - c1p;
+  let deltaHAngle = h2p - h1p;
+  if (c1p * c2p === 0) deltaHAngle = 0;
+  else if (deltaHAngle > 180) deltaHAngle -= 360;
+  else if (deltaHAngle < -180) deltaHAngle += 360;
+  const deltaH = 2 * Math.sqrt(c1p * c2p) * Math.sin(radians(deltaHAngle / 2));
+  const meanL = (first.l + second.l) / 2, meanCp = (c1p + c2p) / 2;
+  let meanH = h1p + h2p;
+  if (c1p * c2p === 0) meanH = h1p + h2p;
+  else if (Math.abs(h1p - h2p) <= 180) meanH /= 2;
+  else meanH = (meanH + (meanH < 360 ? 360 : -360)) / 2;
+  const t = 1
+    - .17 * Math.cos(radians(meanH - 30))
+    + .24 * Math.cos(radians(2 * meanH))
+    + .32 * Math.cos(radians(3 * meanH + 6))
+    - .20 * Math.cos(radians(4 * meanH - 63));
+  const sl = 1 + .015 * (meanL - 50) ** 2 / Math.sqrt(20 + (meanL - 50) ** 2);
+  const sc = 1 + .045 * meanCp, sh = 1 + .015 * meanCp * t;
+  const deltaTheta = 30 * Math.exp(-1 * ((meanH - 275) / 25) ** 2);
+  const rc = 2 * Math.sqrt(meanCp ** 7 / (meanCp ** 7 + 25 ** 7));
+  const rt = -rc * Math.sin(radians(2 * deltaTheta));
+  const lTerm = deltaL / sl, cTerm = deltaC / sc, hTerm = deltaH / sh;
+  return Math.sqrt(lTerm ** 2 + cTerm ** 2 + hTerm ** 2 + rt * cTerm * hTerm);
 }
 
 export function parseColorRows(rows: DataRow[], columns: string[], schema: SchemaKind): { rows: CanonicalColorRow[]; rejected: number } {
@@ -851,6 +895,142 @@ export function runHumanAiGewCohortTest(rows: GewRow[]): AnalysisResult {
     };
   });
   return { id: "task2-cohort-test", title: "人类–AI情绪轮来源级精确比较", kind: "statistics", rows: output, summary: [{ label: "颜色×情绪", value: String(output.length) }, { label: "分析单位", value: "来源" }, { label: "多重校正", value: "BH-FDR" }], note: "先在每个来源内计算颜色×情绪的选择率与平均强度，再以来源为独立单位进行人类/AI双侧精确置换检验。4+4来源时每项穷举70种标签分配；选择率和强度分别进行BH-FDR校正。" };
+}
+
+function ranksWithTies(values: number[]) {
+  const indexed = values.map((value, index) => ({ value, index })).sort((a, b) => a.value - b.value);
+  const ranks = new Array(values.length).fill(0);
+  for (let start = 0; start < indexed.length;) {
+    let end = start + 1;
+    while (end < indexed.length && Math.abs(indexed[end].value - indexed[start].value) < 1e-12) end += 1;
+    const rank = (start + 1 + end) / 2;
+    for (let index = start; index < end; index += 1) ranks[indexed[index].index] = rank;
+    start = end;
+  }
+  return ranks;
+}
+
+function normalizeDistribution(values: number[]) {
+  const total = values.reduce((sum, value) => sum + Math.max(0, value), 0);
+  return total ? values.map(value => Math.max(0, value) / total) : values.map(() => 0);
+}
+
+function spearmanWithTies(first: number[], second: number[]) {
+  const firstRanks = ranksWithTies(first), secondRanks = ranksWithTies(second);
+  const firstVaries = firstRanks.some(value => Math.abs(value - firstRanks[0]) > 1e-12);
+  const secondVaries = secondRanks.some(value => Math.abs(value - secondRanks[0]) > 1e-12);
+  return firstVaries && secondVaries ? pearson(firstRanks, secondRanks) : NaN;
+}
+
+export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows: GewRow[]): AnalysisResult {
+  const validGew = gewRows.filter(row => row.valid);
+  const colorSources = new Set(colors.map(row => row.source));
+  const sources = [...new Set(validGew.map(row => row.source))].filter(source => colorSources.has(source));
+  const standardLabs = GEW_COLOURS.map(code => {
+    const rgb = hexToRgb(GEW_COLOR_HEX[code])!;
+    return { code, hex: GEW_COLOR_HEX[code], lab: rgbToLab(rgb.r, rgb.g, rgb.b) };
+  });
+  const counts = summarizeGew(validGew), output: ExportRow[] = [];
+  let mappedColors = 0, mappingDistanceTotal = 0;
+
+  sources.forEach(source => {
+    const sourceColors = colors.filter(row => row.source === source);
+    const sourceGew = validGew.filter(row => row.source === source);
+    const cohort = sourceColors.find(row => row.cohort !== "unspecified")?.cohort
+      || sourceGew.find(row => row.cohort !== "unspecified")?.cohort
+      || "unspecified";
+    const mapped = sourceColors.map(row => {
+      const matches = standardLabs.map(standard => ({
+        ...standard,
+        delta: deltaE2000(
+          { l: row.labL, a: row.labA, b: row.labB },
+          standard.lab,
+        ),
+      })).sort((a, b) => a.delta - b.delta);
+      mappedColors += 1; mappingDistanceTotal += matches[0].delta;
+      return { row, code: matches[0].code, delta: matches[0].delta };
+    });
+
+    const gewProfiles = new Map<string, { probability: number; conditional: number; total: number }>();
+    GEW_COLOURS.forEach(code => GEW_EMOTIONS.forEach(emotion => {
+      const group = counts.get(`${source}\u0000${code}\u0000${emotion}`) || { n: 0, yes: 0, intensity: 0, selectedIntensity: 0 };
+      gewProfiles.set(`${code}\u0000${emotion}`, {
+        probability: group.yes / Math.max(1, group.n),
+        conditional: group.selectedIntensity / Math.max(1, group.yes),
+        total: group.intensity / Math.max(1, group.n),
+      });
+    }));
+
+    GEW_EMOTIONS.forEach(emotion => {
+      const emotionMapped = mapped.filter(item => item.row.emotion === emotion);
+      if (!emotionMapped.length) return;
+      const wordCounts = GEW_COLOURS.map(code => emotionMapped.filter(item => item.code === code).length);
+      const wordDistribution = normalizeDistribution(wordCounts);
+      const probabilityRaw = GEW_COLOURS.map(code => gewProfiles.get(`${code}\u0000${emotion}`)?.probability || 0);
+      const totalRaw = GEW_COLOURS.map(code => gewProfiles.get(`${code}\u0000${emotion}`)?.total || 0);
+      const conditionalRaw = GEW_COLOURS.map(code => gewProfiles.get(`${code}\u0000${emotion}`)?.conditional || 0);
+      const probabilityDistribution = normalizeDistribution(probabilityRaw);
+      const totalDistribution = normalizeDistribution(totalRaw);
+      const conditionalDistribution = normalizeDistribution(conditionalRaw);
+      const totalAvailable = totalRaw.some(value => value > 0), probabilityAvailable = probabilityRaw.some(value => value > 0);
+      const topWord = [...wordDistribution.keys()].sort((a, b) => wordDistribution[b] - wordDistribution[a]);
+      const topEmotionForColor = (colorIndex: number, limit: number) => [...GEW_EMOTIONS]
+        .map((candidate, index) => ({ candidate, index, value: gewProfiles.get(`${GEW_COLOURS[colorIndex]}\u0000${candidate}`)?.total || 0 }))
+        .sort((a, b) => b.value - a.value || a.index - b.index)
+        .slice(0, limit)
+        .map(item => item.candidate);
+      const top1Mutual = totalAvailable && topEmotionForColor(topWord[0], 1).includes(emotion);
+      const top3Mutual = topWord.slice(0, 3).filter(index => topEmotionForColor(index, 3).includes(emotion)).length / 3;
+      const rankTotal = totalAvailable ? spearmanWithTies(wordDistribution, totalDistribution) : NaN;
+      const rankProbability = probabilityAvailable ? spearmanWithTies(wordDistribution, probabilityDistribution) : NaN;
+      const jsdSimilarity = totalAvailable ? 1 - jsd(wordDistribution, totalDistribution) : NaN;
+      const meanAbsoluteAsymmetry = totalAvailable
+        ? wordDistribution.reduce((sum, value, index) => sum + Math.abs(value - totalDistribution[index]), 0) / GEW_COLOURS.length
+        : NaN;
+
+      GEW_COLOURS.forEach((code, index) => {
+        const p = wordDistribution[index], q = totalDistribution[index];
+        output.push({
+          来源: source,
+          组类型: cohort,
+          情绪: emotion,
+          标准色码: code,
+          标准HEX: GEW_COLOR_HEX[code],
+          词选色映射样本数: wordCounts[index],
+          词选色概率_P: round(p, 6),
+          色选词关联概率: round(probabilityRaw[index], 6),
+          色选词条件强度: round(conditionalRaw[index], 6),
+          色选词综合均值: round(totalRaw[index], 6),
+          色选词归一化综合_Q: round(q, 6),
+          色选词归一化概率: round(probabilityDistribution[index], 6),
+          色选词归一化条件强度: round(conditionalDistribution[index], 6),
+          方向差_P减Q: totalAvailable ? round(p - q, 6) : null,
+          双向调和强度: totalAvailable && p + q ? round(2 * p * q / (p + q), 6) : 0,
+          情绪颜色排序Spearman_综合: Number.isFinite(rankTotal) ? round(rankTotal, 6) : null,
+          情绪颜色排序Spearman_概率: Number.isFinite(rankProbability) ? round(rankProbability, 6) : null,
+          JSD相似度_综合: Number.isFinite(jsdSimilarity) ? round(jsdSimilarity, 6) : null,
+          Top1相互首选: top1Mutual,
+          Top3相互比例: totalAvailable ? round(top3Mutual, 6) : null,
+          平均绝对非对称: Number.isFinite(meanAbsoluteAsymmetry) ? round(meanAbsoluteAsymmetry, 6) : null,
+          映射平均ΔE00: round(emotionMapped.reduce((sum, item) => sum + item.delta, 0) / emotionMapped.length, 5),
+        });
+      });
+    });
+  });
+  const sourceEmotionCount = new Set(output.map(row => `${row["来源"]}\u0000${row["情绪"]}`)).size;
+  return {
+    id: "task-cross-bidirectional",
+    title: "双向情绪—颜色一致性与非对称性",
+    kind: "statistics",
+    rows: output,
+    summary: [
+      { label: "可配对来源", value: String(sources.length) },
+      { label: "来源×情绪", value: String(sourceEmotionCount) },
+      { label: "硬映射色彩", value: String(mappedColors) },
+      { label: "平均映射ΔE00", value: mappedColors ? round(mappingDistanceTotal / mappedColors, 3).toFixed(3) : "—" },
+    ],
+    note: "将自由词选色以 CIEDE2000 硬映射到实验二的 11 个标准色，再按同名来源构造 20×11 双向矩阵。输出 Top-1/Top-3 相互首选、Spearman 排序一致性、JSD 分布相似度、P−Q 方向差与调和互惠强度。该结果是来源层面的双向关联，不应在缺少共同 participant/run 标识时解释为个体回认。",
+  };
 }
 
 export function toCsv(rows: ExportRow[]) {

@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { BidirectionalVisualLab } from "./analysis/BidirectionalVisualLab";
 import { Task1VisualLab } from "./analysis/Task1VisualLab";
+import { Task2VisualLab } from "./analysis/Task2VisualLab";
 import {
   colorRowsToExport,
   detectDataset,
@@ -9,6 +11,7 @@ import {
   inspectRowQuality,
   parseColorRows,
   parseGewRows,
+  runBidirectionalConsistency,
   runColorClustering,
   runColorDiversity,
   runCulturalBias,
@@ -100,9 +103,8 @@ const TASKS = [
   { id: "task2-concentration", group: "实验二 · 扩展", title: "情绪集中度与多样性", description: "用 Shannon 熵与有效情绪数检验 AI 是否更集中于少数典型情绪。", output: "集中度指标", space: "20 维选择率 · Shannon entropy" },
   { id: "task2-human-ai", group: "实验二 · 扩展", title: "人类–AI 情绪轮对齐", description: "逐颜色寻找 AI 最接近的人类组，同时报告分布距离与轮廓相关。", output: "人类–AI 对齐表", space: "JSD + Pearson 相关" },
   { id: "task2-cohort-test", group: "实验二 · 推断", title: "人类–AI 来源级精确检验", description: "在每个来源内汇总颜色×情绪的选择率与零值纳入强度，再做 4×4 来源级精确置换与 FDR 校正。", output: "选择率 / 强度效应与 p/q", space: "来源级 70种精确标签置换 + BH-FDR" },
+  { id: "task-cross-bidirectional", group: "双向整合 · 探索", title: "双向一致性与非对称性", description: "将自由词选色按 CIEDE2000 映射到 11 个标准色，与色选词矩阵比较 Top-1/Top-3、Spearman、JSD、方向差与互惠强度。", output: "20×11 双向关联长表", space: "ΔE00 硬映射 + Spearman + JSD + P−Q" },
 ] as const;
-
-const COLOR_HEX: Record<string, string> = { J0: "#262626", A0: "#F2F2F2", G3: "#BB1F23", F17: "#00904A", C9: "#FFBC00", F29: "#007FD3", I6: "#4B2819", H35: "#6F2A78", D38: "#F38EBB", F4: "#DD4200", F0: "#808080" };
 
 function download(name: string, content: string, type = "text/csv;charset=utf-8") {
   const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
@@ -282,11 +284,10 @@ export function AnalysisPlatform() {
   const [loadingFile, setLoadingFile] = useState(false);
   const [fileError, setFileError] = useState("");
   const [runs, setRuns] = useState<Record<string, TaskRun>>({});
-  const [dashboardMode, setDashboardMode] = useState<"task1" | "task2">("task1");
+  const [dashboardMode, setDashboardMode] = useState<"task1" | "task2" | "bidirectional">("task1");
   const [sourceFilter, setSourceFilter] = useState("全部来源");
   const [emotionFilter, setEmotionFilter] = useState("全部情绪");
   const [colorFilter, setColorFilter] = useState("全部颜色");
-  const [metric, setMetric] = useState<"选择率" | "平均强度_全部">("选择率");
 
   const activeGroup = groups.find(group => group.id === activeGroupId) || groups[0];
   const sheet = activeGroup?.sheets.find(item => item.name === activeGroup.sheetName);
@@ -335,13 +336,23 @@ export function AnalysisPlatform() {
     invalidCells: parsedGroups.reduce((sum, item) => sum + item.gew.invalidCells, 0),
   }), [parsedGroups]);
   const gewDescription = useMemo(() => runGewDescriptive(gewData.rows).rows, [gewData.rows]);
+  const bidirectionalData = useMemo(() => runBidirectionalConsistency(colorData.rows, gewData.rows), [colorData.rows, gewData.rows]);
   const activeColumnRecommendation = useMemo(() => sheet ? columnRecommendation(sheet.rows, sheet.columns) : null, [sheet]);
 
-  const sources = useMemo(() => [...new Set((dashboardMode === "task1" ? colorData.rows.map(row => row.source) : gewData.rows.map(row => row.source)))], [dashboardMode, colorData.rows, gewData.rows]);
-  const emotions = useMemo(() => [...new Set((dashboardMode === "task1" ? colorData.rows.map(row => row.emotion) : gewData.rows.map(row => row.emotion)))], [dashboardMode, colorData.rows, gewData.rows]);
+  const sources = useMemo(() => [...new Set(dashboardMode === "task1"
+    ? colorData.rows.map(row => row.source)
+    : dashboardMode === "task2"
+      ? gewData.rows.map(row => row.source)
+      : bidirectionalData.rows.map(row => String(row["来源"] || "")))].filter(Boolean), [dashboardMode, colorData.rows, gewData.rows, bidirectionalData.rows]);
+  const emotions = useMemo(() => [...new Set(dashboardMode === "task1"
+    ? colorData.rows.map(row => row.emotion)
+    : dashboardMode === "task2"
+      ? gewData.rows.map(row => row.emotion)
+      : bidirectionalData.rows.map(row => String(row["情绪"] || "")))].filter(Boolean), [dashboardMode, colorData.rows, gewData.rows, bidirectionalData.rows]);
   const colors = useMemo(() => [...new Set(gewData.rows.map(row => row.color))], [gewData.rows]);
   const dashboardColors = colorData.rows.filter(row => (sourceFilter === "全部来源" || row.source === sourceFilter) && (emotionFilter === "全部情绪" || row.emotion === emotionFilter));
   const dashboardGew = gewDescription.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter) && (colorFilter === "全部颜色" || row["颜色"] === colorFilter));
+  const dashboardBidirectional = bidirectionalData.rows.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter));
 
   async function loadFiles(fileList?: FileList | File[]) {
     const files = Array.from(fileList || []);
@@ -565,7 +576,8 @@ export function AnalysisPlatform() {
       else if (id === "task2-valence") result = runGewValenceProfile(gewData.rows);
       else if (id === "task2-concentration") result = runGewConcentration(gewData.rows);
       else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
-      else result = runHumanAiGewCohortTest(gewData.rows);
+      else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
+      else result = bidirectionalData;
       if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
       setRuns(current => ({ ...current, [id]: { status: "completed", result } }));
     } catch (error) { setRuns(current => ({ ...current, [id]: { status: "error", error: error instanceof Error ? error.message : "分析失败" } })); }
@@ -583,6 +595,7 @@ export function AnalysisPlatform() {
     if (["task2-omnibus", "task2-pairwise", "task2-jsd"].includes(id)) return task2 && gewSources >= 2;
     if (id === "task2-human-ai") return task2 && gewData.rows.some(row => row.cohort === "human") && gewData.rows.some(row => row.cohort === "ai");
     if (id === "task2-cohort-test") return task2 && new Set(gewData.rows.filter(row => row.cohort === "human").map(row => row.source)).size >= 2 && new Set(gewData.rows.filter(row => row.cohort === "ai").map(row => row.source)).size >= 2;
+    if (id === "task-cross-bidirectional") return bidirectionalData.rows.length > 0;
     return id.startsWith("task1") ? task1 : task2;
   }
 
@@ -738,7 +751,7 @@ export function AnalysisPlatform() {
     const archive = zipSync(files, { level: 6 });
     downloadBlob(`${safeFileName(fileName)}_Chromalab完整归档.zip`, new Blob([archive.slice().buffer as ArrayBuffer], { type: "application/zip" }));
   }
-  function resetDashboardFilters(mode: "task1" | "task2") { setDashboardMode(mode); setSourceFilter("全部来源"); setEmotionFilter("全部情绪"); setColorFilter("全部颜色"); }
+  function resetDashboardFilters(mode: "task1" | "task2" | "bidirectional") { setDashboardMode(mode); setSourceFilter("全部来源"); setEmotionFilter("全部情绪"); setColorFilter("全部颜色"); }
 
   const selectedTaskCount = TASKS.filter(task => taskAvailable(task.id)).length;
   const completeCount = Object.values(runs).filter(run => run.status === "completed").length;
@@ -839,10 +852,10 @@ export function AnalysisPlatform() {
         </div>
         <p className="pipeline-assurance">即使按 1 → 7 依次点击，每个单元也都从同一份未舍入的标准化内存数据读取，不会把上一项导出的 HSL、HSV 或 Lab 表再次误解析。</p>
       </section>
-      {(["实验一", "实验二"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : "B"}</span><div><h2>{group === "实验一" ? "词选色分析" : "日内瓦情绪轮分析"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : "前 5 项完成 QC、描述与差异检验，另加价性、集中度、对齐与 4×4 来源级精确置换检验。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
+      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "前 5 项完成 QC、描述与差异检验，另加价性、集中度、对齐与 4×4 来源级精确置换检验。" : "仅在同一来源同时包含词选色和色选词时启用；当前为群体层面的探索性结构比较，不冒充个体回认。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
         const available = taskAvailable(task.id), run = runs[task.id] || { status: "idle" as const };
         return <article key={task.id} className={`analysis-task-card ${available ? "available" : "disabled"} ${run.status}`}>
-          <div className="task-card-top"><span>{String(index + 1).padStart(2, "0")}{task.group.includes("扩展") ? <small>扩展</small> : task.group.includes("推断") ? <small>推断</small> : null}</span><em className={`run-state ${run.status}`}>{run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : run.status === "error" ? "需检查" : available ? "可运行" : "不适用"}</em></div>
+          <div className="task-card-top"><span>{String(index + 1).padStart(2, "0")}{task.group.includes("扩展") ? <small>扩展</small> : task.group.includes("推断") ? <small>推断</small> : task.group.includes("探索") ? <small>探索</small> : null}</span><em className={`run-state ${run.status}`}>{run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : run.status === "error" ? "需检查" : available ? "可运行" : "不适用"}</em></div>
           <h3>{task.title}</h3><p>{task.description}</p><div className="task-space">{task.space}</div><div className="task-output"><span>输出</span><b>{task.output}</b></div>
           {run.result ? <><div className="task-result-metrics">{run.result.summary.slice(0, 3).map(item => <div key={item.label}><strong>{item.value}</strong><span>{item.label}</span></div>)}</div><ResultPreview result={run.result} /></> : null}
           {run.error ? <div className="task-error">{run.error}</div> : null}
@@ -852,15 +865,19 @@ export function AnalysisPlatform() {
     </section> : null}
 
     {tab === "dashboard" ? <section className="analysis-dashboard">
-      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><button className="secondary" disabled={dashboardMode === "task1" ? !dashboardColors.length : !dashboardGew.length} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" ? colorRowsToExport(dashboardColors) : dashboardGew) as ExportRow[]))}>导出当前视图 ↓</button></div>
+      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><button className="secondary" disabled={dashboardMode === "task1" ? !dashboardColors.length : dashboardMode === "task2" ? !dashboardGew.length : !dashboardBidirectional.length} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" ? colorRowsToExport(dashboardColors) : dashboardMode === "task2" ? dashboardGew : dashboardBidirectional) as ExportRow[]))}>导出当前视图 ↓</button></div>
       <div className="dashboard-toolbar panel">
-        <div className="dashboard-mode"><button className={dashboardMode === "task1" ? "active" : ""} onClick={() => resetDashboardFilters("task1")}>实验一 · 词选色</button><button className={dashboardMode === "task2" ? "active" : ""} onClick={() => resetDashboardFilters("task2")}>实验二 · 情绪轮</button></div>
+        <div className="dashboard-mode"><button className={dashboardMode === "task1" ? "active" : ""} onClick={() => resetDashboardFilters("task1")}>实验一 · 词选色</button><button className={dashboardMode === "task2" ? "active" : ""} onClick={() => resetDashboardFilters("task2")}>实验二 · 情绪轮</button><button className={dashboardMode === "bidirectional" ? "active" : ""} onClick={() => resetDashboardFilters("bidirectional")}>双向整合 · 探索</button></div>
         <label>来源<select value={sources.includes(sourceFilter) ? sourceFilter : "全部来源"} onChange={event => setSourceFilter(event.target.value)}><option>全部来源</option>{sources.map(value => <option key={value}>{value}</option>)}</select></label>
         <label>情绪<select value={emotions.includes(emotionFilter) ? emotionFilter : "全部情绪"} onChange={event => setEmotionFilter(event.target.value)}><option>全部情绪</option>{emotions.map(value => <option key={value}>{value}</option>)}</select></label>
-        {dashboardMode === "task2" ? <><label>颜色<select value={colors.includes(colorFilter) ? colorFilter : "全部颜色"} onChange={event => setColorFilter(event.target.value)}><option>全部颜色</option>{colors.map(value => <option key={value}>{value}</option>)}</select></label><label>指标<select value={metric} onChange={event => setMetric(event.target.value as typeof metric)}><option>选择率</option><option>平均强度_全部</option></select></label></> : null}
+        {dashboardMode === "task2" ? <label>颜色<select value={colors.includes(colorFilter) ? colorFilter : "全部颜色"} onChange={event => setColorFilter(event.target.value)}><option>全部颜色</option>{colors.map(value => <option key={value}>{value}</option>)}</select></label> : null}
       </div>
 
-      {dashboardMode === "task1" ? <Task1Dashboard rows={dashboardColors} fileName={fileName} /> : <Task2Dashboard rows={dashboardGew} metric={metric} />}
+      {dashboardMode === "task1"
+        ? <Task1Dashboard rows={dashboardColors} fileName={fileName} />
+        : dashboardMode === "task2"
+          ? <Task2Dashboard rows={dashboardGew} fileName={fileName} />
+          : <BidirectionalVisualLab rows={dashboardBidirectional} />}
     </section> : null}
   </>;
 }
@@ -878,16 +895,11 @@ function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColor
   </>;
 }
 
-function Task2Dashboard({ rows, metric }: { rows: ExportRow[]; metric: "选择率" | "平均强度_全部" }) {
-  const numeric = rows.map(row => Number(row[metric]) || 0); const maximum = metric === "选择率" ? 1 : 5; const sorted = [...rows].sort((a, b) => Number(b[metric]) - Number(a[metric])).slice(0, 24);
+function Task2Dashboard({ rows, fileName }: { rows: ExportRow[]; fileName: string }) {
+  const numeric = rows.map(row => Number(row["选择率"]) || 0);
   const selectedTotal = rows.reduce((sum, row) => sum + Number(row["选择次数"] || 0), 0); const sampleTotal = rows.reduce((sum, row) => sum + Number(row["N"] || 0), 0);
   return <>
-    <div className="dashboard-kpis"><article><span>统计单元</span><strong>{rows.length.toLocaleString()}</strong><small>来源 × 颜色 × 情绪</small></article><article><span>总体选择率</span><strong>{sampleTotal ? (selectedTotal / sampleTotal * 100).toFixed(1) : "0.0"}%</strong><small>当前筛选范围</small></article><article><span>平均指标</span><strong>{numeric.length ? (numeric.reduce((sum, value) => sum + value, 0) / numeric.length).toFixed(2) : "0.00"}</strong><small>{metric}</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row["来源"])).size}</strong><small>当前可见</small></article></div>
-    <div className="dashboard-grid wide-left">
-      <section className="dashboard-panel panel"><div className="panel-head"><div><h3>{metric}排行</h3><p>显示当前筛选中数值最高的 24 个来源 × 颜色 × 情绪组合。</p></div><span className="analysis-count">{metric === "选择率" ? "0–100%" : "0–5"}</span></div>{sorted.length ? <div className="gew-bars">{sorted.map((row, index) => <div key={index}><span className="bar-label"><b>{String(row["情绪"])}</b><small>{String(row["来源"])} · {String(row["颜色"])}</small></span><i><em style={{ width: `${Math.min(100, Number(row[metric]) / maximum * 100)}%`, background: COLOR_HEX[String(row["颜色"])] || "#34839a" }} /></i><strong>{metric === "选择率" ? `${(Number(row[metric]) * 100).toFixed(1)}%` : Number(row[metric]).toFixed(2)}</strong></div>)}</div> : <DashboardEmpty />}</section>
-      <section className="dashboard-panel panel"><div className="panel-head"><div><h3>颜色覆盖</h3><p>每种色码的可见统计单元数。</p></div></div>{rows.length ? <div className="color-coverage">{[...new Set(rows.map(row => String(row["颜色"])))].map(color => { const count = rows.filter(row => row["颜色"] === color).length; return <div key={color}><i style={{ background: COLOR_HEX[color] || "#9aa" }} /><span><b>{color}</b><small>{count} 个统计单元</small></span></div>; })}</div> : <DashboardEmpty />}</section>
-    </div>
+    <div className="dashboard-kpis"><article><span>统计单元</span><strong>{rows.length.toLocaleString()}</strong><small>来源 × 颜色 × 情绪</small></article><article><span>总体选择率</span><strong>{sampleTotal ? (selectedTotal / sampleTotal * 100).toFixed(1) : "0.0"}%</strong><small>当前筛选范围</small></article><article><span>平均选择率</span><strong>{numeric.length ? (numeric.reduce((sum, value) => sum + value, 0) / numeric.length * 100).toFixed(1) : "0.0"}%</strong><small>各统计单元等权</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row["来源"])).size}</strong><small>当前可见</small></article></div>
+    <Task2VisualLab data={{ id: "dashboard-task2", title: "当前筛选 GEW 描述", kind: "table", rows, summary: [] }} fileName={fileName} />
   </>;
 }
-
-function DashboardEmpty() { return <div className="dashboard-empty"><span>○</span><b>当前筛选没有可显示的数据</b><small>请调整来源、情绪或颜色筛选。</small></div>; }

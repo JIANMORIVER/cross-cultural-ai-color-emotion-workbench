@@ -15,11 +15,13 @@ test("defines the Chromalab research workspace and social metadata", async () =>
 });
 
 test("provides local multi-file analysis, independent exports, and filtered dashboards", async () => {
-  const [platform, analysis, engine, task1Visuals] = await Promise.all([
+  const [platform, analysis, engine, task1Visuals, task2Visuals, bidirectionalVisuals] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/analysis/engine.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/analysis/Task1VisualLab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/Task2VisualLab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/BidirectionalVisualLab.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(platform, /数据分析/);
   assert.match(analysis, /multiple/);
@@ -55,6 +57,9 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(engine, /task2-concentration/);
   assert.match(engine, /task2-human-ai/);
   assert.match(engine, /task2-cohort-test/);
+  assert.match(engine, /task-cross-bidirectional/);
+  assert.match(engine, /deltaE2000/);
+  assert.match(engine, /JSD相似度_综合/);
   assert.match(engine, /regularizedGammaQ/);
   assert.match(engine, /conversionPath/);
   assert.match(engine, /consistencyDeltaE/);
@@ -65,7 +70,15 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(task1Visuals, /情绪–来源难度聚类热图/);
   assert.match(task1Visuals, /文化引力场散点图/);
   assert.match(task1Visuals, /文化距离斜率图/);
+  assert.match(task1Visuals, /a\*–b\* 色域密度分面/);
+  assert.match(task1Visuals, /L\* 与色度分布 \/ 集中度/);
   assert.match(task1Visuals, /导出图表 PNG/);
+  assert.match(task2Visuals, /关联概率与条件强度/);
+  assert.match(task2Visuals, /单一颜色的 20 情绪径向画像/);
+  assert.match(task2Visuals, /来源差值热力图/);
+  assert.match(bidirectionalVisuals, /方向差热图/);
+  assert.match(bidirectionalVisuals, /双向散点/);
+  assert.match(analysis, /双向整合 · 探索/);
 });
 
 test("removes starter preview markers and keeps API keys out of exports", async () => {

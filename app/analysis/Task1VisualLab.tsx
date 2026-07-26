@@ -13,11 +13,13 @@ import {
   type ExportRow,
 } from "./engine";
 
-type ChartKind = "hs-polar" | "vs-density" | "mosaic" | "cluster-strip" | "within-delta" | "delta-heatmap" | "delta-box" | "delta-mean" | "radar" | "dumbbell" | "parity" | "bias-bars" | "gravity" | "slopegraph" | "bias-density" | "rank-heatmap" | "difficulty-heatmap";
+type ChartKind = "hs-polar" | "vs-density" | "lab-ab-density" | "lab-distribution" | "mosaic" | "cluster-strip" | "within-delta" | "delta-heatmap" | "delta-box" | "delta-mean" | "radar" | "dumbbell" | "parity" | "bias-bars" | "gravity" | "slopegraph" | "bias-density" | "rank-heatmap" | "difficulty-heatmap";
 
 const CHARTS: Array<{ id: ChartKind; group: string; label: string; script: string }> = [
   { id: "hs-polar", group: "HSV 分布", label: "H–S 极坐标分面", script: "hsvplot.py" },
   { id: "vs-density", group: "HSV 分布", label: "V–S 密度散点分面", script: "hsvplot.py" },
+  { id: "lab-ab-density", group: "CIELAB 分布", label: "a*–b* 色域密度分面", script: "新增 · CIELAB D65" },
+  { id: "lab-distribution", group: "CIELAB 分布", label: "L* 与色度分布 / 集中度", script: "新增 · CIELAB D65" },
   { id: "mosaic", group: "原始选择", label: "原始色彩马赛克", script: "plott.py" },
   { id: "cluster-strip", group: "聚类", label: "K-means 权重色带", script: "Bias_kMeans_Visualization.py" },
   { id: "within-delta", group: "色差", label: "组内一致性色差", script: "demac.py / de2mac.py" },
@@ -63,12 +65,27 @@ function deltaValue(delta: ExportRow[], emotion: string, a: string, b: string) {
   return row ? valueOf(row, "对称最小ΔE76") : NaN;
 }
 
+function labRowsToExport(rows: CanonicalColorRow[]): ExportRow[] {
+  return rows.map(row => ({
+    行号: row.row,
+    来源: row.source,
+    组类型: row.cohort,
+    情绪: row.emotion,
+    HEX: row.hex,
+    L星: round(row.labL, 4),
+    a星: round(row.labA, 4),
+    b星: round(row.labB, 4),
+    C星_ab: round(Math.hypot(row.labA, row.labB), 4),
+  }));
+}
+
 function chartData(kind: ChartKind, rows: CanonicalColorRow[]) {
   if (kind === "cluster-strip") return runColorClustering(rows).rows;
   if (kind === "within-delta") return runWithinGroupDelta(rows).rows;
   if (["delta-heatmap", "delta-box", "delta-mean", "radar", "dumbbell", "parity", "gravity", "slopegraph", "rank-heatmap", "difficulty-heatmap"].includes(kind)) return runDeltaE(rows).rows;
   if (["bias-bars", "bias-density"].includes(kind)) return runCulturalBias(rows).rows;
   if (["hs-polar", "vs-density"].includes(kind)) return runHsvDistribution(rows).rows;
+  if (["lab-ab-density", "lab-distribution"].includes(kind)) return labRowsToExport(rows);
   return colorRowsToExport(rows);
 }
 
@@ -80,7 +97,7 @@ export function Task1VisualLab({ rows, fileName }: { rows: CanonicalColorRow[]; 
   return <section className="visual-lab panel">
     <div className="visual-lab-head"><div><span className="eyebrow">历史脚本可视化图谱</span><h3>{selected.label}</h3><p>对应 {selected.script} · 当前筛选 {rows.length.toLocaleString()} 个色彩观察</p></div><div className="visual-export"><button className="secondary" disabled={!data.length} onClick={() => download(`${safeName}_${kind}.csv`, toCsv(data))}>导出图表数据 CSV</button><button className="primary" disabled={!rows.length} onClick={() => plotRef.current && void downloadElementPng(plotRef.current, `${safeName}_${kind}.png`)}>导出图表 PNG</button></div></div>
     <div className="visual-lab-controls"><label>可视化分析<select value={kind} onChange={event => setKind(event.target.value as ChartKind)}>{[...new Set(CHARTS.map(chart => chart.group))].map(group => <optgroup key={group} label={group}>{CHARTS.filter(chart => chart.group === group).map(chart => <option key={chart.id} value={chart.id}>{chart.label}</option>)}</optgroup>)}</select></label>{needsReferences ? <><label>参照 A<select value={effectiveA} onChange={event => setReferenceA(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label><label>参照 B<select value={effectiveB} onChange={event => setReferenceB(event.target.value)}>{sources.filter(source => source !== effectiveA).map(source => <option key={source}>{source}</option>)}</select></label></> : null}</div>
-    <div className="visual-stage" ref={plotRef}>{!rows.length ? <VisualEmpty /> : kind === "hs-polar" ? <HsPolar rows={rows} /> : kind === "vs-density" ? <VsDensity rows={rows} /> : kind === "mosaic" ? <Mosaic rows={rows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}</div>
+    <div className="visual-stage" ref={plotRef}>{!rows.length ? <VisualEmpty /> : kind === "hs-polar" ? <HsPolar rows={rows} /> : kind === "vs-density" ? <VsDensity rows={rows} /> : kind === "lab-ab-density" ? <LabAbDensity rows={rows} /> : kind === "lab-distribution" ? <LabDistributions rows={rows} /> : kind === "mosaic" ? <Mosaic rows={rows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}</div>
   </section>;
 }
 
@@ -90,6 +107,116 @@ function HsPolar({ rows }: { rows: CanonicalColorRow[] }) {
 
 function VsDensity({ rows }: { rows: CanonicalColorRow[] }) {
   return <div className="facet-grid">{groupBySource(rows).map(group => { const bins=12; const counts=Array.from({length:bins*bins},()=>0); group.rows.forEach(row=>{const x=Math.min(bins-1,Math.floor(row.hsvS*bins)),y=Math.min(bins-1,Math.floor(row.hsvV*bins));counts[y*bins+x]+=1;});const max=Math.max(1,...counts);return <article className="chart-facet" key={group.source}><h4>{group.source}</h4><svg viewBox="0 0 260 220" role="img" aria-label={`${group.source} V-S 密度散点分布`}>{counts.map((count,index)=>{const x=index%bins,y=Math.floor(index/bins);return <rect key={index} x={34+x*17} y={190-(y+1)*14} width="17" height="14" fill="#277b92" opacity={count? .08+.42*count/max:0}/>;})}<line className="chart-axis" x1="34" y1="190" x2="238" y2="190"/><line className="chart-axis" x1="34" y1="22" x2="34" y2="190"/>{group.rows.slice(0,1200).map((row,index)=><circle key={index} cx={34+row.hsvS*204} cy={190-row.hsvV*168} r="2.5" fill={row.hex} opacity=".58"><title>{row.emotion} · S {round(row.hsvS,2)} · V {round(row.hsvV,2)}</title></circle>)}<text x="132" y="213">Saturation</text><text transform="translate(11 128) rotate(-90)">Value</text><text x="31" y="204">0</text><text x="232" y="204">1</text><text x="20" y="28">1</text></svg><p>N={group.rows.length} · 底色为 12×12 二维密度</p></article>;})}</div>;
+}
+
+function LabAbDensity({ rows }: { rows: CanonicalColorRow[] }) {
+  const groups = groupBySource(rows);
+  const largestCoordinate = Math.max(1, ...rows.flatMap(row => [Math.abs(row.labA), Math.abs(row.labB)]));
+  const limit = Math.max(40, Math.ceil(largestCoordinate / 20) * 20);
+  const bins = 14;
+  const plotX = 38, plotY = 18, plotSize = 218;
+  const xOf = (value: number) => plotX + (value + limit) / (limit * 2) * plotSize;
+  const yOf = (value: number) => plotY + plotSize - (value + limit) / (limit * 2) * plotSize;
+  return <div>
+    <div className="lab-scale-note"><span><i className="lab-density-key" />密度格</span><span><i className="lab-centroid-key" />组中心</span><b>全部分面使用同一坐标范围 ±{limit}</b></div>
+    <div className="facet-grid">{groups.map(group => {
+      const counts = Array.from({ length: bins * bins }, () => 0);
+      group.rows.forEach(row => {
+        const x = Math.min(bins - 1, Math.max(0, Math.floor((row.labA + limit) / (limit * 2) * bins)));
+        const y = Math.min(bins - 1, Math.max(0, Math.floor((row.labB + limit) / (limit * 2) * bins)));
+        counts[y * bins + x] += 1;
+      });
+      const peak = Math.max(1, ...counts);
+      const meanA = group.rows.reduce((sum, row) => sum + row.labA, 0) / group.rows.length;
+      const meanB = group.rows.reduce((sum, row) => sum + row.labB, 0) / group.rows.length;
+      const chroma = group.rows.map(row => Math.hypot(row.labA, row.labB));
+      const stride = Math.max(1, Math.ceil(group.rows.length / 800));
+      return <article className="chart-facet lab-ab-facet" key={group.source}>
+        <div className="lab-facet-title"><h4>{group.source}</h4><span>N={group.rows.length}</span></div>
+        <svg viewBox="0 0 276 270" role="img" aria-label={`${group.source} CIELAB a 星 b 星色域密度分布`}>
+          {counts.map((count, index) => {
+            if (!count) return null;
+            const x = index % bins, y = Math.floor(index / bins), cell = plotSize / bins;
+            return <rect key={index} x={plotX + x * cell} y={plotY + plotSize - (y + 1) * cell} width={cell} height={cell} fill="#277b92" opacity={.06 + .48 * count / peak}><title>格内 N={count}</title></rect>;
+          })}
+          <line className="lab-zero-axis" x1={xOf(0)} x2={xOf(0)} y1={plotY} y2={plotY + plotSize} />
+          <line className="lab-zero-axis" x1={plotX} x2={plotX + plotSize} y1={yOf(0)} y2={yOf(0)} />
+          <rect className="lab-plot-frame" x={plotX} y={plotY} width={plotSize} height={plotSize} />
+          {group.rows.map((row, index) => index % stride === 0 ? <circle key={index} cx={xOf(row.labA)} cy={yOf(row.labB)} r="2.35" fill={row.hex} opacity=".64"><title>{row.emotion} · L* {round(row.labL, 1)} · a* {round(row.labA, 1)} · b* {round(row.labB, 1)}</title></circle> : null)}
+          <circle className="lab-centroid-halo" cx={xOf(meanA)} cy={yOf(meanB)} r="7" />
+          <circle className="lab-centroid" cx={xOf(meanA)} cy={yOf(meanB)} r="3.7"><title>组中心 a* {round(meanA, 1)} · b* {round(meanB, 1)}</title></circle>
+          <text x={plotX} y="252" textAnchor="start">绿 −a*</text><text x={plotX + plotSize} y="252" textAnchor="end">+a* 红</text>
+          <text x="24" y={plotY + 5} textAnchor="middle">黄</text><text x="24" y={plotY + plotSize} textAnchor="middle">蓝</text>
+        </svg>
+        <p>中心 a* {meanA.toFixed(1)} / b* {meanB.toFixed(1)} · 中位 C*ab {quantile(chroma, .5).toFixed(1)}</p>
+      </article>;
+    })}</div>
+    <p className="chart-note">密度格用于判断热点和多中心；彩色散点保留实际选色。a* 为绿–红轴，b* 为蓝–黄轴，图中不混用 HSL 明度。</p>
+  </div>;
+}
+
+function histogram(values: number[], bins: number, maxValue: number) {
+  const counts = Array.from({ length: bins }, () => 0);
+  values.forEach(value => {
+    const index = Math.min(bins - 1, Math.max(0, Math.floor(value / Math.max(1, maxValue) * bins)));
+    counts[index] += 1;
+  });
+  return counts;
+}
+
+function DistributionStrip({ values, maxValue, label, color }: { values: number[]; maxValue: number; label: string; color: string }) {
+  const bins = 20, counts = histogram(values, bins, maxValue), peak = Math.max(1, ...counts);
+  const min = Math.min(...values), q1 = quantile(values, .25), median = quantile(values, .5), q3 = quantile(values, .75), max = Math.max(...values);
+  const xOf = (value: number) => 14 + Math.min(1, Math.max(0, value / maxValue)) * 392;
+  return <figure className="lab-distribution-figure">
+    <figcaption><b>{label}</b><span>中位数 {median.toFixed(1)} · IQR {(q3 - q1).toFixed(1)}</span></figcaption>
+    <svg viewBox="0 0 420 96" role="img" aria-label={`${label} 直方图与箱线概览`}>
+      {counts.map((count, index) => <rect key={index} x={14 + index * (392 / bins) + 1} y={61 - count / peak * 48} width={392 / bins - 2} height={count / peak * 48} fill={color} opacity={.22 + .66 * count / peak}><title>N={count}</title></rect>)}
+      <line className="distribution-baseline" x1="14" x2="406" y1="62" y2="62" />
+      <line className="distribution-whisker" x1={xOf(min)} x2={xOf(max)} y1="76" y2="76" />
+      <line className="distribution-whisker" x1={xOf(min)} x2={xOf(min)} y1="70" y2="82" />
+      <line className="distribution-whisker" x1={xOf(max)} x2={xOf(max)} y1="70" y2="82" />
+      <rect className="distribution-box" x={xOf(q1)} y="68" width={Math.max(2, xOf(q3) - xOf(q1))} height="16" style={{ fill: color }} />
+      <line className="distribution-median" x1={xOf(median)} x2={xOf(median)} y1="67" y2="85" />
+      <text x="14" y="94" textAnchor="start">0</text><text x="406" y="94" textAnchor="end">{maxValue.toFixed(0)}</text>
+    </svg>
+  </figure>;
+}
+
+function LabDistributions({ rows }: { rows: CanonicalColorRow[] }) {
+  const groups = groupBySource(rows);
+  const allChroma = rows.map(row => Math.hypot(row.labA, row.labB));
+  const chromaMax = Math.max(20, Math.ceil(Math.max(...allChroma) / 20) * 20);
+  return <div className="lab-distribution-list">
+    <div className="lab-scale-note"><span>L* 固定 0–100</span><span>C*ab 统一 0–{chromaMax}</span><b>箱体为 IQR，须线为当前范围</b></div>
+    {groups.map(group => {
+      const lightness = group.rows.map(row => row.labL);
+      const chroma = group.rows.map(row => Math.hypot(row.labA, row.labB));
+      const center = [
+        group.rows.reduce((sum, row) => sum + row.labL, 0) / group.rows.length,
+        group.rows.reduce((sum, row) => sum + row.labA, 0) / group.rows.length,
+        group.rows.reduce((sum, row) => sum + row.labB, 0) / group.rows.length,
+      ];
+      const centerDistances = group.rows.map(row => Math.hypot(row.labL - center[0], row.labA - center[1], row.labB - center[2]));
+      const cohorts = [...new Set(group.rows.map(row => row.cohort))].join(" / ");
+      return <article className="lab-distribution-card" key={group.source}>
+        <header><div><h4>{group.source}</h4><span>{cohorts} · N={group.rows.length}</span></div><small>ΔE76 越低，组内越集中</small></header>
+        <div className="lab-distribution-body">
+          <div className="lab-distribution-plots">
+            <DistributionStrip values={lightness} maxValue={100} label="知觉明度 L*" color="#277b92" />
+            <DistributionStrip values={chroma} maxValue={chromaMax} label="色度 C*ab" color="#d47d55" />
+          </div>
+          <dl className="lab-concentration">
+            <div><dt>中心距离中位数</dt><dd>{quantile(centerDistances, .5).toFixed(1)}<small>ΔE76</small></dd></div>
+            <div><dt>90% 中心半径</dt><dd>{quantile(centerDistances, .9).toFixed(1)}<small>ΔE76</small></dd></div>
+            <div><dt>L* 中间 50%</dt><dd>{quantile(lightness, .25).toFixed(1)}–{quantile(lightness, .75).toFixed(1)}</dd></div>
+            <div><dt>C*ab 中间 50%</dt><dd>{quantile(chroma, .25).toFixed(1)}–{quantile(chroma, .75).toFixed(1)}</dd></div>
+          </dl>
+        </div>
+      </article>;
+    })}
+    <p className="chart-note">C*ab = √(a*²+b*²)。中心距离采用 CIELAB 欧氏距离（ΔE76）作描述性集中度；显著性判断仍应结合组内色差与置换检验。</p>
+  </div>;
 }
 
 function Mosaic({ rows }: { rows: CanonicalColorRow[] }) {
