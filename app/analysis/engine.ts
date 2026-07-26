@@ -838,11 +838,155 @@ export function runGewConcentration(rows: GewRow[]): AnalysisResult {
   return { id: "task2-concentration", title: "情绪集中度与多样性", kind: "statistics", rows: output, summary: [{ label: "来源×颜色", value: String(output.length) }, { label: "有效情绪范围", value: "1–20" }, { label: "输入", value: "选择率分布" }], note: "Shannon 熵与有效情绪数刻画一个颜色引发的情绪分布是集中还是分散，可检验 AI 是否比人类呈现更刻板的少数情绪。" };
 }
 
+function hashSeed(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function percentile(values: number[], probability: number) {
+  if (!values.length) return NaN;
+  const sorted = [...values].sort((a, b) => a - b), position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position), upper = Math.ceil(position), weight = position - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function bootstrapMeanInterval(values: number[], seed: string, iterations = 500) {
+  if (!values.length) return { mean: NaN, low: NaN, high: NaN };
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (values.length === 1) return { mean, low: mean, high: mean };
+  const random = seededRandom(hashSeed(seed)), estimates: number[] = [];
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let total = 0;
+    for (let index = 0; index < values.length; index += 1) total += values[Math.floor(random() * values.length)];
+    estimates.push(total / values.length);
+  }
+  return { mean, low: percentile(estimates, .025), high: percentile(estimates, .975) };
+}
+
+export function runGewCompositeIndicators(rows: GewRow[], bootstrapIterations = 500): AnalysisResult {
+  const valid = rows.filter(row => row.valid);
+  const sampleGroups = new Map<string, GewRow[]>();
+  valid.forEach(row => {
+    const key = `${row.source}\u0000${row.participant}\u0000${row.run}\u0000${row.color}`;
+    const group = sampleGroups.get(key) || [];
+    group.push(row); sampleGroups.set(key, group);
+  });
+  const samples = [...sampleGroups.entries()].map(([key, group]) => {
+    const [source, participant, run, color] = key.split("\u0000");
+    const selected = group.filter(row => row.selected > 0);
+    const positive = selected.filter(row => VALENCE[row.emotion] > 0).length;
+    const negative = selected.filter(row => VALENCE[row.emotion] < 0).length;
+    return {
+      source, participant, run, color, cohort: group[0]?.cohort || "unspecified",
+      broadness: selected.length,
+      conditionalIntensity: selected.length ? selected.reduce((sum, row) => sum + row.intensity, 0) / selected.length : null,
+      valenceBias: positive + negative ? (positive - negative) / (positive + negative) : null,
+    };
+  });
+  const groupKeys = [...new Set(samples.map(sample => `${sample.source}\u0000${sample.color}`))], output: ExportRow[] = [];
+  groupKeys.forEach(key => {
+    const [source, color] = key.split("\u0000"), group = samples.filter(sample => sample.source === source && sample.color === color);
+    const broadness = bootstrapMeanInterval(group.map(sample => sample.broadness), `${key}-broadness`, bootstrapIterations);
+    const intensity = bootstrapMeanInterval(group.flatMap(sample => sample.conditionalIntensity === null ? [] : [sample.conditionalIntensity]), `${key}-intensity`, bootstrapIterations);
+    const valence = bootstrapMeanInterval(group.flatMap(sample => sample.valenceBias === null ? [] : [sample.valenceBias]), `${key}-valence`, bootstrapIterations);
+    output.push({
+      来源: source, 组类型: group[0]?.cohort || "unspecified", 颜色: color, 独立样本数: group.length,
+      平均情绪广度: round(broadness.mean, 6), 广度95CI下限: round(broadness.low, 6), 广度95CI上限: round(broadness.high, 6),
+      平均条件强度: Number.isFinite(intensity.mean) ? round(intensity.mean, 6) : null,
+      条件强度95CI下限: Number.isFinite(intensity.low) ? round(intensity.low, 6) : null,
+      条件强度95CI上限: Number.isFinite(intensity.high) ? round(intensity.high, 6) : null,
+      平均效价偏向: Number.isFinite(valence.mean) ? round(valence.mean, 6) : null,
+      效价偏向95CI下限: Number.isFinite(valence.low) ? round(valence.low, 6) : null,
+      效价偏向95CI上限: Number.isFinite(valence.high) ? round(valence.high, 6) : null,
+    });
+  });
+  return {
+    id: "task2-indicators", title: "GEW 广度、条件强度与效价偏向", kind: "statistics", rows: output,
+    summary: [{ label: "独立样本×颜色", value: String(samples.length) }, { label: "来源×颜色", value: String(output.length) }, { label: "区间估计", value: `${bootstrapIterations}次 Bootstrap` }],
+    note: `以 participant×run×color 为独立单位：Broadness 为选择情绪数（0–20），条件强度仅在已选择情绪中计算，效价偏向=(正向数−负向数)/(正向数+负向数)。区间为固定随机种子的${bootstrapIterations}次百分位Bootstrap。未加入唤醒度/力量偏向，因为当前数据未提供经验证的GEW维度坐标。`,
+  };
+}
+
 function pearson(a: number[], b: number[]) {
   const meanA = a.reduce((sum, value) => sum + value, 0) / Math.max(1, a.length), meanB = b.reduce((sum, value) => sum + value, 0) / Math.max(1, b.length);
   const numerator = a.reduce((sum, value, index) => sum + (value - meanA) * (b[index] - meanB), 0);
   const denominator = Math.sqrt(a.reduce((sum, value) => sum + (value - meanA) ** 2, 0) * b.reduce((sum, value) => sum + (value - meanB) ** 2, 0));
   return denominator ? numerator / denominator : 0;
+}
+
+function profileMean(profiles: number[][]) {
+  if (!profiles.length) return [];
+  return profiles[0].map((_, index) => profiles.reduce((sum, profile) => sum + profile[index], 0) / profiles.length);
+}
+
+function validCorrelation(first: number[], second: number[]) {
+  if (!first.length || first.length !== second.length) return NaN;
+  const firstVaries = first.some(value => Math.abs(value - first[0]) > 1e-12);
+  const secondVaries = second.some(value => Math.abs(value - second[0]) > 1e-12);
+  return firstVaries && secondVaries ? pearson(first, second) : NaN;
+}
+
+export function runGewPatternSimilarity(rows: GewRow[], bootstrapIterations = 500): AnalysisResult {
+  const valid = rows.filter(row => row.valid);
+  const dimensions = GEW_COLOURS.flatMap(color => GEW_EMOTIONS.map(emotion => `${color}\u0000${emotion}`));
+  const sampleGroups = new Map<string, GewRow[]>();
+  valid.forEach(row => {
+    const key = `${row.source}\u0000${row.participant}\u0000${row.run}`;
+    const group = sampleGroups.get(key) || [];
+    group.push(row); sampleGroups.set(key, group);
+  });
+  const sourceProfiles = new Map<string, number[][]>(), sourceCohorts = new Map<string, GewRow["cohort"]>();
+  sampleGroups.forEach((group, key) => {
+    const [source] = key.split("\u0000"), lookup = new Map(group.map(row => [`${row.color}\u0000${row.emotion}`, row.selected]));
+    const profiles = sourceProfiles.get(source) || [];
+    profiles.push(dimensions.map(dimension => lookup.get(dimension) || 0));
+    sourceProfiles.set(source, profiles);
+    sourceCohorts.set(source, group.find(row => row.cohort !== "unspecified")?.cohort || group[0]?.cohort || "unspecified");
+  });
+  const sources = [...sourceProfiles.keys()], output: ExportRow[] = [];
+  const observedProfiles = new Map(sources.map(source => [source, profileMean(sourceProfiles.get(source) || [])]));
+  const bootstrapProfiles = new Map<string, number[][]>();
+  if (bootstrapIterations > 0) sources.forEach(source => {
+    const profiles = sourceProfiles.get(source) || [], random = seededRandom(hashSeed(`${source}-pattern-bootstrap`)), estimates: number[][] = [];
+    for (let iteration = 0; iteration < bootstrapIterations; iteration += 1) {
+      const mean = new Array(dimensions.length).fill(0);
+      for (let draw = 0; draw < profiles.length; draw += 1) {
+        const profile = profiles[Math.floor(random() * profiles.length)];
+        for (let dimension = 0; dimension < mean.length; dimension += 1) mean[dimension] += profile[dimension] / profiles.length;
+      }
+      estimates.push(mean);
+    }
+    bootstrapProfiles.set(source, estimates);
+  });
+  sources.forEach((sourceA, sourceIndex) => sources.slice(sourceIndex + 1).forEach(sourceB => {
+    const profilesA = sourceProfiles.get(sourceA) || [], profilesB = sourceProfiles.get(sourceB) || [];
+    const observed = validCorrelation(observedProfiles.get(sourceA) || [], observedProfiles.get(sourceB) || []);
+    const bootA = bootstrapProfiles.get(sourceA) || [], bootB = bootstrapProfiles.get(sourceB) || [], estimates: number[] = [];
+    for (let iteration = 0; iteration < Math.min(bootA.length, bootB.length); iteration += 1) {
+      const estimate = validCorrelation(bootA[iteration], bootB[iteration]);
+      if (Number.isFinite(estimate)) estimates.push(estimate);
+    }
+    const cohortA = sourceCohorts.get(sourceA) || "unspecified", cohortB = sourceCohorts.get(sourceB) || "unspecified";
+    output.push({
+      来源A: sourceA, A组类型: cohortA, A独立样本数: profilesA.length,
+      来源B: sourceB, B组类型: cohortB, B独立样本数: profilesB.length,
+      来源关系: cohortA === cohortB ? `${cohortA}内部` : "人类_AI",
+      颜色情绪矩阵Pearson_r: Number.isFinite(observed) ? round(observed, 6) : null,
+      Bootstrap95CI下限: estimates.length ? round(percentile(estimates, .025), 6) : null,
+      Bootstrap95CI上限: estimates.length ? round(percentile(estimates, .975), 6) : null,
+      Bootstrap有效次数: estimates.length,
+      矩阵维度: dimensions.length,
+    });
+  }));
+  return {
+    id: "task2-pattern", title: "11×20 颜色—情绪模式相似性", kind: "matrix", rows: output,
+    summary: [{ label: "来源", value: String(sources.length) }, { label: "来源对", value: String(output.length) }, { label: "矩阵维度", value: String(dimensions.length) }],
+    note: `将每个来源的11×20关联概率矩阵展平为220维向量，计算来源对Pearson模式相似性；95%区间以participant×run为抽样单位分别在两个来源内进行${bootstrapIterations}次固定种子Bootstrap。该指标回答整体结构相似性，不替代具体单元格差异检验。`,
+  };
 }
 
 export function runHumanAiGewAlignment(rows: GewRow[]): AnalysisResult {
@@ -972,7 +1116,7 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
       const probabilityDistribution = normalizeDistribution(probabilityRaw);
       const totalDistribution = normalizeDistribution(totalRaw);
       const conditionalDistribution = normalizeDistribution(conditionalRaw);
-      const totalAvailable = totalRaw.some(value => value > 0), probabilityAvailable = probabilityRaw.some(value => value > 0);
+      const totalAvailable = totalRaw.some(value => value > 0), probabilityAvailable = probabilityRaw.some(value => value > 0), conditionalAvailable = conditionalRaw.some(value => value > 0);
       const topWord = [...wordDistribution.keys()].sort((a, b) => wordDistribution[b] - wordDistribution[a]);
       const topEmotionForColor = (colorIndex: number, limit: number) => [...GEW_EMOTIONS]
         .map((candidate, index) => ({ candidate, index, value: gewProfiles.get(`${GEW_COLOURS[colorIndex]}\u0000${candidate}`)?.total || 0 }))
@@ -983,7 +1127,10 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
       const top3Mutual = topWord.slice(0, 3).filter(index => topEmotionForColor(index, 3).includes(emotion)).length / 3;
       const rankTotal = totalAvailable ? spearmanWithTies(wordDistribution, totalDistribution) : NaN;
       const rankProbability = probabilityAvailable ? spearmanWithTies(wordDistribution, probabilityDistribution) : NaN;
+      const rankConditional = conditionalAvailable ? spearmanWithTies(wordDistribution, conditionalDistribution) : NaN;
       const jsdSimilarity = totalAvailable ? 1 - jsd(wordDistribution, totalDistribution) : NaN;
+      const jsdProbability = probabilityAvailable ? 1 - jsd(wordDistribution, probabilityDistribution) : NaN;
+      const jsdConditional = conditionalAvailable ? 1 - jsd(wordDistribution, conditionalDistribution) : NaN;
       const meanAbsoluteAsymmetry = totalAvailable
         ? wordDistribution.reduce((sum, value, index) => sum + Math.abs(value - totalDistribution[index]), 0) / GEW_COLOURS.length
         : NaN;
@@ -1008,7 +1155,10 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
           双向调和强度: totalAvailable && p + q ? round(2 * p * q / (p + q), 6) : 0,
           情绪颜色排序Spearman_综合: Number.isFinite(rankTotal) ? round(rankTotal, 6) : null,
           情绪颜色排序Spearman_概率: Number.isFinite(rankProbability) ? round(rankProbability, 6) : null,
+          情绪颜色排序Spearman_条件强度: Number.isFinite(rankConditional) ? round(rankConditional, 6) : null,
           JSD相似度_综合: Number.isFinite(jsdSimilarity) ? round(jsdSimilarity, 6) : null,
+          JSD相似度_关联概率: Number.isFinite(jsdProbability) ? round(jsdProbability, 6) : null,
+          JSD相似度_条件强度: Number.isFinite(jsdConditional) ? round(jsdConditional, 6) : null,
           Top1相互首选: top1Mutual,
           Top3相互比例: totalAvailable ? round(top3Mutual, 6) : null,
           平均绝对非对称: Number.isFinite(meanAbsoluteAsymmetry) ? round(meanAbsoluteAsymmetry, 6) : null,
@@ -1029,7 +1179,7 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
       { label: "硬映射色彩", value: String(mappedColors) },
       { label: "平均映射ΔE00", value: mappedColors ? round(mappingDistanceTotal / mappedColors, 3).toFixed(3) : "—" },
     ],
-    note: "将自由词选色以 CIEDE2000 硬映射到实验二的 11 个标准色，再按同名来源构造 20×11 双向矩阵。输出 Top-1/Top-3 相互首选、Spearman 排序一致性、JSD 分布相似度、P−Q 方向差与调和互惠强度。该结果是来源层面的双向关联，不应在缺少共同 participant/run 标识时解释为个体回认。",
+    note: "将自由词选色以 CIEDE2000 硬映射到实验二的 11 个标准色，再按同名来源构造 20×11 双向矩阵。实验二方向分别保留关联概率、已选择条件强度和零值纳入综合强度三种口径，并输出对应Spearman与JSD相似度；Top-1/Top-3、P−Q与调和互惠强度默认基于综合强度。该结果是主流GEW分析之后的来源级探索扩展，不应在缺少共同participant/run标识时解释为个体回认。",
   };
 }
 

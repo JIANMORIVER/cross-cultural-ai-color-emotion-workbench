@@ -4,6 +4,12 @@ import { useMemo, useState } from "react";
 import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, type ExportRow } from "./engine";
 
 type View = "paired" | "symmetry" | "asymmetry" | "scatter";
+type QMetric = "probability" | "conditional" | "overall";
+const Q_METRICS: Record<QMetric, { label: string; field: string; rank: string; jsd: string }> = {
+  probability: { label: "关联概率", field: "色选词归一化概率", rank: "情绪颜色排序Spearman_概率", jsd: "JSD相似度_关联概率" },
+  conditional: { label: "条件强度", field: "色选词归一化条件强度", rank: "情绪颜色排序Spearman_条件强度", jsd: "JSD相似度_条件强度" },
+  overall: { label: "综合强度（含零值）", field: "色选词归一化综合_Q", rank: "情绪颜色排序Spearman_综合", jsd: "JSD相似度_综合" },
+};
 
 function numberOf(row: ExportRow, key: string) {
   const value = Number(row[key]);
@@ -17,6 +23,7 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
   const [selectedSource, setSelectedSource] = useState("");
   const [selectedEmotion, setSelectedEmotion] = useState("");
   const [view, setView] = useState<View>("paired");
+  const [qMetric, setQMetric] = useState<QMetric>("probability");
   const source = sources.includes(selectedSource) ? selectedSource : sources[0] || "";
   const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => labelOf(row, "情绪") === emotion));
   const emotion = emotions.includes(selectedEmotion as typeof GEW_EMOTIONS[number]) ? selectedEmotion : emotions[0] || "";
@@ -25,8 +32,8 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
     const row = visible.find(item => labelOf(item, "情绪") === emotion);
     return row ? [row] : [];
   });
-  const meanRank = average(emotionRows.map(row => numberOf(row, "情绪颜色排序Spearman_综合")));
-  const meanJsd = average(emotionRows.map(row => numberOf(row, "JSD相似度_综合")));
+  const meanRank = average(emotionRows.map(row => numberOf(row, Q_METRICS[qMetric].rank)));
+  const meanJsd = average(emotionRows.map(row => numberOf(row, Q_METRICS[qMetric].jsd)));
   const top1Rate = average(emotionRows.map(row => row["Top1相互首选"] ? 1 : 0));
   const meanAsymmetry = average(emotionRows.map(row => numberOf(row, "平均绝对非对称")));
 
@@ -40,18 +47,18 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
     <div className="visual-tabs" role="tablist" aria-label="双向一致性视图">
       <button className={view === "paired" ? "active" : ""} onClick={() => setView("paired")}>P / Q 直接展陈</button>
       <button className={view === "symmetry" ? "active" : ""} onClick={() => setView("symmetry")}>情绪一致性</button>
-      <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图</button>
-      <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点</button>
+      <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图（综合）</button>
+      <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点（综合）</button>
     </div>
     <div className="bidirectional-canvas">
-      {view === "paired" ? <PairedProbabilityFacets rows={rows} emotion={emotion} emotions={emotions} onEmotionChange={setSelectedEmotion} /> : null}
-      {view === "symmetry" ? <SymmetryPlot rows={emotionRows} /> : null}
+      {view === "paired" ? <PairedProbabilityFacets rows={rows} emotion={emotion} emotions={emotions} onEmotionChange={setSelectedEmotion} qMetric={qMetric} onQMetricChange={setQMetric} /> : null}
+      {view === "symmetry" ? <SymmetryPlot rows={emotionRows} qMetric={qMetric} /> : null}
       {view === "asymmetry" ? <AsymmetryHeatmap rows={visible} /> : null}
       {view === "scatter" ? <BidirectionalScatter rows={visible} /> : null}
     </div>
     <div className="bidirectional-kpis">
-      <article><span>平均排序一致性</span><b>{meanRank.toFixed(3)}</b><small>Spearman · −1 至 1</small></article>
-      <article><span>平均分布相似度</span><b>{meanJsd.toFixed(3)}</b><small>1 − JSD · 0 至 1</small></article>
+      <article><span>平均排序一致性</span><b>{meanRank.toFixed(3)}</b><small>{Q_METRICS[qMetric].label} · Spearman</small></article>
+      <article><span>平均分布相似度</span><b>{meanJsd.toFixed(3)}</b><small>{Q_METRICS[qMetric].label} · 1−JSD</small></article>
       <article><span>Top-1 相互首选</span><b>{(top1Rate * 100).toFixed(1)}%</b><small>情绪 ⇄ 标准色</small></article>
       <article><span>平均绝对非对称</span><b>{meanAsymmetry.toFixed(3)}</b><small>mean |P − Q|</small></article>
     </div>
@@ -59,18 +66,18 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
   </section>;
 }
 
-function PairedProbabilityFacets({ rows, emotion, emotions, onEmotionChange }: { rows: ExportRow[]; emotion: string; emotions: readonly string[]; onEmotionChange: (emotion: string) => void }) {
+function PairedProbabilityFacets({ rows, emotion, emotions, onEmotionChange, qMetric, onQMetricChange }: { rows: ExportRow[]; emotion: string; emotions: readonly string[]; onEmotionChange: (emotion: string) => void; qMetric: QMetric; onQMetricChange: (metric: QMetric) => void }) {
   const sources = [...new Set(rows.map(row => labelOf(row, "来源")))].filter(Boolean);
   return <div className="paired-probability-display">
-    <div className="paired-display-head"><div><span>DIRECT DISTRIBUTION</span><h4>同一情绪的双向概率色带</h4><p>P = 词选色中映射到该标准色的比例；Q = 色选词综合强度归一化后的比例。每个来源单独分面，横向同为 0–100%。</p></div><label>情绪<select value={emotion} onChange={event => onEmotionChange(event.target.value)}>{emotions.map(item => <option key={item}>{item}</option>)}</select></label></div>
-    <div className="paired-display-legend"><span><i className="p-key" />P · 词选色</span><span><i className="q-key" />Q · 色选词</span><small>色块 = 11 个实验标准色</small></div>
+    <div className="paired-display-head"><div><span>DIRECT DISTRIBUTION</span><h4>同一情绪的双向概率色带</h4><p>P = 词选色映射比例；Q 可分别采用色选词的关联概率、条件强度或零值纳入综合强度。每个来源单独分面，口径不再混合。</p></div><div className="paired-display-controls"><label>情绪<select value={emotion} onChange={event => onEmotionChange(event.target.value)}>{emotions.map(item => <option key={item}>{item}</option>)}</select></label><label>Q 口径<select value={qMetric} onChange={event => onQMetricChange(event.target.value as QMetric)}>{Object.entries(Q_METRICS).map(([key, item]) => <option value={key} key={key}>{item.label}</option>)}</select></label></div></div>
+    <div className="paired-display-legend"><span><i className="p-key" />P · 词选色映射比例</span><span><i className="q-key" />Q · {Q_METRICS[qMetric].label}</span><small>各方向分别归一化到 100%</small></div>
     <div className="paired-source-facets">{sources.map(source => {
       const sourceRows = rows.filter(row => labelOf(row, "来源") === source && labelOf(row, "情绪") === emotion);
       return <article key={source}>
         <header><h5>{source}</h5><span>{emotion} · {sourceRows.reduce((sum, row) => sum + numberOf(row, "词选色映射样本数"), 0)} 个词选色样本</span></header>
         <div className="paired-color-grid">{GEW_COLOURS.map(code => {
           const row = sourceRows.find(item => labelOf(item, "标准色码") === code);
-          const p = row ? numberOf(row, "词选色概率_P") : 0, q = row ? numberOf(row, "色选词归一化综合_Q") : 0;
+          const p = row ? numberOf(row, "词选色概率_P") : 0, q = row ? numberOf(row, Q_METRICS[qMetric].field) : 0;
           return <div className="paired-color-card" key={code} title={`${source} · ${emotion} · ${code}\nP=${p.toFixed(3)}\nQ=${q.toFixed(3)}`}>
             <div className="paired-color-name"><i style={{ background: GEW_COLOR_HEX[code] }} /><b>{code}</b><em className={p >= q ? "positive" : "negative"}>{p === q ? "P = Q" : `${p > q ? "P" : "Q"} +${Math.abs(p - q).toFixed(2)}`}</em></div>
             <div className="paired-meter"><span>P</span><i><em className="p-bar" style={{ width: `${p * 100}%` }} /></i><strong>{(p * 100).toFixed(1)}%</strong></div>
@@ -82,12 +89,12 @@ function PairedProbabilityFacets({ rows, emotion, emotions, onEmotionChange }: {
   </div>;
 }
 
-function SymmetryPlot({ rows }: { rows: ExportRow[] }) {
-  const ordered = [...rows].sort((a, b) => numberOf(b, "JSD相似度_综合") - numberOf(a, "JSD相似度_综合"));
+function SymmetryPlot({ rows, qMetric }: { rows: ExportRow[]; qMetric: QMetric }) {
+  const ordered = [...rows].sort((a, b) => numberOf(b, Q_METRICS[qMetric].jsd) - numberOf(a, Q_METRICS[qMetric].jsd));
   return <div className="symmetry-list">
     <div className="symmetry-legend"><span><i className="rank-dot" />Spearman</span><span><i className="jsd-dot" />1 − JSD</span><small>中线对应 Spearman 0</small></div>
     {ordered.map(row => {
-      const rank = numberOf(row, "情绪颜色排序Spearman_综合"), jsd = numberOf(row, "JSD相似度_综合");
+      const rank = numberOf(row, Q_METRICS[qMetric].rank), jsd = numberOf(row, Q_METRICS[qMetric].jsd);
       return <article key={labelOf(row, "情绪")}>
         <b>{labelOf(row, "情绪")}</b>
         <div className="symmetry-track">

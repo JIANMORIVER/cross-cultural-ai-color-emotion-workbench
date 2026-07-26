@@ -55,6 +55,8 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(engine, /task1-cohort-test/);
   assert.match(engine, /task2-valence/);
   assert.match(engine, /task2-concentration/);
+  assert.match(engine, /task2-indicators/);
+  assert.match(engine, /task2-pattern/);
   assert.match(engine, /task2-human-ai/);
   assert.match(engine, /task2-cohort-test/);
   assert.match(engine, /task-cross-bidirectional/);
@@ -76,12 +78,16 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(task2Visuals, /关联概率与条件强度/);
   assert.match(task2Visuals, /颜色—情绪气泡点阵分面/);
   assert.match(task2Visuals, /每个来源一张同尺度点阵/);
+  assert.match(task2Visuals, /评分等级的 100% 堆叠分布/);
+  assert.match(task2Visuals, /广度、条件强度与效价偏向/);
+  assert.match(task2Visuals, /完整 11×20 矩阵模式相似性/);
   assert.match(task2Visuals, /单一颜色的 20 情绪径向画像/);
   assert.match(task2Visuals, /来源差值热力图/);
   assert.match(bidirectionalVisuals, /P \/ Q 直接展陈/);
   assert.match(bidirectionalVisuals, /同一情绪的双向概率色带/);
-  assert.match(bidirectionalVisuals, /方向差热图/);
-  assert.match(bidirectionalVisuals, /双向散点/);
+  assert.match(bidirectionalVisuals, /Q 口径/);
+  assert.match(bidirectionalVisuals, /方向差热图（综合）/);
+  assert.match(bidirectionalVisuals, /双向散点（综合）/);
   assert.match(analysis, /双向整合 · 探索/);
 });
 

@@ -18,11 +18,13 @@ import {
   runColorSummary,
   runDeltaE,
   runGewConcentration,
+  runGewCompositeIndicators,
   runHsvDistribution,
   runGewDescriptive,
   runGewJsd,
   runGewOmnibus,
   runGewPairwise,
+  runGewPatternSimilarity,
   runGewQc,
   runGewValenceProfile,
   runHueDistributionDistance,
@@ -36,6 +38,7 @@ import {
   type DataRow,
   type Detection,
   type ExportRow,
+  type GewRow,
 } from "./analysis/engine";
 
 type Cohort = "human" | "ai" | "unspecified";
@@ -101,6 +104,8 @@ const TASKS = [
   { id: "task2-jsd", group: "实验二", title: "情绪分布距离", description: "比较各来源的 20 情绪选择率分布，计算 Jensen–Shannon 距离。", output: "距离矩阵", space: "20 维选择率 · JSD" },
   { id: "task2-valence", group: "实验二 · 扩展", title: "正负价性轮廓", description: "按颜色比较正、负价情绪的选择率、强度与价性偏向。", output: "价性轮廓", space: "GEW 正/负价性聚合" },
   { id: "task2-concentration", group: "实验二 · 扩展", title: "情绪集中度与多样性", description: "用 Shannon 熵与有效情绪数检验 AI 是否更集中于少数典型情绪。", output: "集中度指标", space: "20 维选择率 · Shannon entropy" },
+  { id: "task2-indicators", group: "实验二 · 扩展", title: "广度、条件强度与效价偏向", description: "以 participant×run×color 为单位分别计算情绪广度、已选择条件强度与正负效价偏向，并报告 Bootstrap 95% 区间。", output: "综合指标与区间", space: "Broadness + conditional intensity + valence bias" },
+  { id: "task2-pattern", group: "实验二 · 扩展", title: "完整矩阵模式相似性", description: "将每个来源的 11×20 关联概率矩阵展平为 220 维向量，比较整张颜色—情绪结构并估计 Bootstrap 95% 区间。", output: "来源对模式相关", space: "220维 Pearson r + 500次 Bootstrap" },
   { id: "task2-human-ai", group: "实验二 · 扩展", title: "人类–AI 情绪轮对齐", description: "逐颜色寻找 AI 最接近的人类组，同时报告分布距离与轮廓相关。", output: "人类–AI 对齐表", space: "JSD + Pearson 相关" },
   { id: "task2-cohort-test", group: "实验二 · 推断", title: "人类–AI 来源级精确检验", description: "在每个来源内汇总颜色×情绪的选择率与零值纳入强度，再做 4×4 来源级精确置换与 FDR 校正。", output: "选择率 / 强度效应与 p/q", space: "来源级 70种精确标签置换 + BH-FDR" },
   { id: "task-cross-bidirectional", group: "双向整合 · 探索", title: "双向一致性与非对称性", description: "将自由词选色按 CIEDE2000 映射到 11 个标准色，与色选词矩阵比较 Top-1/Top-3、Spearman、JSD、方向差与互惠强度。", output: "20×11 双向关联长表", space: "ΔE00 硬映射 + Spearman + JSD + P−Q" },
@@ -352,6 +357,7 @@ export function AnalysisPlatform() {
   const colors = useMemo(() => [...new Set(gewData.rows.map(row => row.color))], [gewData.rows]);
   const dashboardColors = colorData.rows.filter(row => (sourceFilter === "全部来源" || row.source === sourceFilter) && (emotionFilter === "全部情绪" || row.emotion === emotionFilter));
   const dashboardGew = gewDescription.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter) && (colorFilter === "全部颜色" || row["颜色"] === colorFilter));
+  const dashboardGewRaw = gewData.rows.filter(row => (sourceFilter === "全部来源" || row.source === sourceFilter) && (colorFilter === "全部颜色" || row.color === colorFilter));
   const dashboardBidirectional = bidirectionalData.rows.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter));
 
   async function loadFiles(fileList?: FileList | File[]) {
@@ -575,6 +581,8 @@ export function AnalysisPlatform() {
       else if (id === "task2-jsd") result = runGewJsd(gewData.rows);
       else if (id === "task2-valence") result = runGewValenceProfile(gewData.rows);
       else if (id === "task2-concentration") result = runGewConcentration(gewData.rows);
+      else if (id === "task2-indicators") result = runGewCompositeIndicators(gewData.rows);
+      else if (id === "task2-pattern") result = runGewPatternSimilarity(gewData.rows);
       else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
       else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
       else result = bidirectionalData;
@@ -592,7 +600,7 @@ export function AnalysisPlatform() {
     if (id === "task1-bias") return task1 && new Set(colorData.rows.map(row => row.source)).size >= 3;
     if (id === "task1-human-ai") return task1 && colorData.rows.some(row => row.cohort === "human") && colorData.rows.some(row => row.cohort === "ai");
     if (id === "task1-cohort-test") return task1 && new Set(colorData.rows.filter(row => row.cohort === "human").map(row => row.source)).size >= 2 && new Set(colorData.rows.filter(row => row.cohort === "ai").map(row => row.source)).size >= 2;
-    if (["task2-omnibus", "task2-pairwise", "task2-jsd"].includes(id)) return task2 && gewSources >= 2;
+    if (["task2-omnibus", "task2-pairwise", "task2-jsd", "task2-pattern"].includes(id)) return task2 && gewSources >= 2;
     if (id === "task2-human-ai") return task2 && gewData.rows.some(row => row.cohort === "human") && gewData.rows.some(row => row.cohort === "ai");
     if (id === "task2-cohort-test") return task2 && new Set(gewData.rows.filter(row => row.cohort === "human").map(row => row.source)).size >= 2 && new Set(gewData.rows.filter(row => row.cohort === "ai").map(row => row.source)).size >= 2;
     if (id === "task-cross-bidirectional") return bidirectionalData.rows.length > 0;
@@ -852,7 +860,7 @@ export function AnalysisPlatform() {
         </div>
         <p className="pipeline-assurance">即使按 1 → 7 依次点击，每个单元也都从同一份未舍入的标准化内存数据读取，不会把上一项导出的 HSL、HSV 或 Lab 表再次误解析。</p>
       </section>
-      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "前 5 项完成 QC、描述与差异检验，另加价性、集中度、对齐与 4×4 来源级精确置换检验。" : "仅在同一来源同时包含词选色和色选词时启用；当前为群体层面的探索性结构比较，不冒充个体回认。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
+      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "以关联概率和条件强度为主线，保留完整 0–5 等级分布，并补充广度、效价偏向、220 维模式相似性及 Bootstrap 区间。" : "仅在同一来源同时包含词选色和色选词时启用；分别比较关联概率、条件强度与零值计入的综合强度，作为群体层面的探索性结构分析。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
         const available = taskAvailable(task.id), run = runs[task.id] || { status: "idle" as const };
         return <article key={task.id} className={`analysis-task-card ${available ? "available" : "disabled"} ${run.status}`}>
           <div className="task-card-top"><span>{String(index + 1).padStart(2, "0")}{task.group.includes("扩展") ? <small>扩展</small> : task.group.includes("推断") ? <small>推断</small> : task.group.includes("探索") ? <small>探索</small> : null}</span><em className={`run-state ${run.status}`}>{run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : run.status === "error" ? "需检查" : available ? "可运行" : "不适用"}</em></div>
@@ -876,7 +884,7 @@ export function AnalysisPlatform() {
       {dashboardMode === "task1"
         ? <Task1Dashboard rows={dashboardColors} fileName={fileName} />
         : dashboardMode === "task2"
-          ? <Task2Dashboard rows={dashboardGew} fileName={fileName} />
+          ? <Task2Dashboard rows={dashboardGew} rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} />
           : <BidirectionalVisualLab rows={dashboardBidirectional} />}
     </section> : null}
   </>;
@@ -895,11 +903,11 @@ function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColor
   </>;
 }
 
-function Task2Dashboard({ rows, fileName }: { rows: ExportRow[]; fileName: string }) {
+function Task2Dashboard({ rows, rawRows, visibleEmotion, fileName }: { rows: ExportRow[]; rawRows: GewRow[]; visibleEmotion?: string; fileName: string }) {
   const numeric = rows.map(row => Number(row["选择率"]) || 0);
   const selectedTotal = rows.reduce((sum, row) => sum + Number(row["选择次数"] || 0), 0); const sampleTotal = rows.reduce((sum, row) => sum + Number(row["N"] || 0), 0);
   return <>
     <div className="dashboard-kpis"><article><span>统计单元</span><strong>{rows.length.toLocaleString()}</strong><small>来源 × 颜色 × 情绪</small></article><article><span>总体选择率</span><strong>{sampleTotal ? (selectedTotal / sampleTotal * 100).toFixed(1) : "0.0"}%</strong><small>当前筛选范围</small></article><article><span>平均选择率</span><strong>{numeric.length ? (numeric.reduce((sum, value) => sum + value, 0) / numeric.length * 100).toFixed(1) : "0.0"}%</strong><small>各统计单元等权</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row["来源"])).size}</strong><small>当前可见</small></article></div>
-    <Task2VisualLab data={{ id: "dashboard-task2", title: "当前筛选 GEW 描述", kind: "table", rows, summary: [] }} fileName={fileName} />
+    <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} />
   </>;
 }
