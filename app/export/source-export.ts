@@ -67,7 +67,22 @@ export type ExportPayload = {
   settings: ExportSettings;
   results: ExportResult[];
   failures?: ExportFailure[];
+  manifest?: ExportManifest[];
   export_scope?: "complete" | "available";
+};
+
+export type ExportManifest = {
+  logical_trial_id: string;
+  batch_id: string;
+  model_id: string;
+  model_alias: string;
+  task_type: string;
+  run_index: number;
+  stimulus_id: string;
+  max_retry_count: number;
+  created_at: string;
+  repair_attempted_at: string | null;
+  completed_at: string | null;
 };
 
 export type ExportFailure = {
@@ -394,6 +409,9 @@ export function buildExperimentConditionRows(payload: ExportPayload): ExportShee
     "重复次数": payload.settings.repetitions,
     "并发数": payload.settings.concurrency,
     "最大重试": payload.settings.max_retry,
+    "运行中即时重试上限": Math.max(0, payload.settings.max_retry - 1),
+    "结束后补齐上限": payload.settings.max_retry > 0 ? 1 : 0,
+    "补齐规则": "仅技术失败或未发出的缺失试次；有效结果不重抽",
     "超时(秒)": payload.settings.timeout_seconds,
     "提示词随机种子": Boolean(payload.settings.prompt_seed_enabled),
     "基础Seed": payload.settings.prompt_seed_base,
@@ -415,6 +433,23 @@ export function buildExperimentConditionRows(payload: ExportPayload): ExportShee
   }));
 }
 
+export function buildTrialManifestRows(payload: ExportPayload): ExportSheetRow[] {
+  return (payload.manifest ?? []).map(item => ({
+    "逻辑试次ID": item.logical_trial_id,
+    "批次ID": item.batch_id,
+    "模型ID": item.model_id,
+    "模型别名": item.model_alias,
+    "任务": item.task_type,
+    "重复轮次": item.run_index,
+    "刺激项": item.stimulus_id,
+    "总重试上限": item.max_retry_count,
+    "清单登记时间": item.created_at,
+    "结束后补齐时间": item.repair_attempted_at ?? "",
+    "有效结果时间": item.completed_at ?? "",
+    "最终状态": item.completed_at ? "Valid" : item.repair_attempted_at ? "补齐后仍缺失" : "待检查",
+  }));
+}
+
 export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly string[], colors: ReadonlyArray<readonly [string, string]>) {
   const wordRows = buildWordToColorRows(payload, emotions);
   const colorRows = buildColorToEmotionRows(payload, colors);
@@ -424,6 +459,7 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
       { "项目": "颜色格式", "内容": "保留模型返回的源色彩字段，不从 HEX 计算 RGB、HSV 或 Lab。" },
       { "项目": "回答内容", "内容": "JSON 文本保留源字段结构，便于与原始多模型实验结果直接对照。" },
       { "项目": "安全", "内容": "API Key 不写入数据库，也不包含在任何导出文件中。" },
+      { "项目": "缺失补齐", "内容": "仅对清单中无有效结果且最后错误可重试的试次执行一次；有效回答绝不重新抽样。" },
       { "项目": "项目ID", "内容": payload.project.id },
       { "项目": "实验版本", "内容": payload.project.experiment_version },
     ],
@@ -438,6 +474,8 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
       { "配置项": "并发数", "值": payload.settings.concurrency },
       { "配置项": "并行模型组ID", "值": payload.settings.model_slot_ids || "" },
       { "配置项": "最大重试", "值": payload.settings.max_retry },
+      { "配置项": "运行中即时重试上限", "值": Math.max(0, payload.settings.max_retry - 1) },
+      { "配置项": "结束后补齐上限", "值": payload.settings.max_retry > 0 ? 1 : 0 },
       { "配置项": "超时（秒）", "值": payload.settings.timeout_seconds },
       { "配置项": "提示词随机种子", "值": Boolean(payload.settings.prompt_seed_enabled) },
       { "配置项": "基础 Seed", "值": payload.settings.prompt_seed_base },
@@ -459,6 +497,7 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
     })),
     word_to_color_source: wordRows,
     color_to_emotion_source: colorRows,
+    trial_manifest: buildTrialManifestRows(payload),
     invalid_records: (payload.failures ?? []).map(failure => ({
       "尝试ID": failure.attempt_id,
       "试次ID": failure.logical_trial_id,

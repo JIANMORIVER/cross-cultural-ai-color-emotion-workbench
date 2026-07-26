@@ -7,7 +7,7 @@ export async function GET() {
   const table = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='trial_results'").first();
   if (!table) return Response.json({ error: "Workspace is not initialized." }, { status: 409 });
 
-  const [project, models, settings, results, failures] = await Promise.all([
+  const [project, models, settings, results, failures, manifest] = await Promise.all([
     db.prepare("SELECT * FROM projects WHERE id = ?").bind(PROJECT_ID).first(),
     db.prepare("SELECT * FROM model_configs WHERE project_id = ? ORDER BY rowid").bind(PROJECT_ID).all(),
     db.prepare(`SELECT repetitions, run_word_to_color, run_color_to_emotion, concurrency,
@@ -25,6 +25,10 @@ export async function GET() {
       FROM trial_attempts
       WHERE project_id = ? AND status != 'success'
       ORDER BY model_alias, run_index, stimulus_id, attempt_no`).bind(PROJECT_ID).all(),
+    db.prepare(`SELECT logical_trial_id, batch_id, model_id, model_alias, task_type,
+      run_index, stimulus_id, max_retry_count, created_at, repair_attempted_at, completed_at
+      FROM trial_manifest WHERE project_id = ?
+      ORDER BY model_alias, run_index, task_type, stimulus_index`).bind(PROJECT_ID).all(),
   ]);
 
   return Response.json({
@@ -33,5 +37,6 @@ export async function GET() {
     settings,
     results: results.results,
     failures: failures.results,
+    manifest: manifest.results,
   });
 }

@@ -241,6 +241,26 @@ test("persists exact failed attempts and uses tolerant validated response parsin
   assert.match(migration, /CREATE TABLE `trial_attempts`/);
 });
 
+test("registers an a-priori trial manifest and allows one capped post-run repair only for retryable missing trials", async () => {
+  const [platform, manifestRoute, runRoute, workspaceRoute, migration] = await Promise.all([
+    readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/trial-manifest/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/run-trial/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/workspace/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0007_wandering_vivisector.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(platform, /registerTrialManifest/);
+  assert.match(platform, /immediateRetryLimit = Math\.max\(0, settings\.max_retry - 1\)/);
+  assert.match(platform, /repairMissingTrials/);
+  assert.match(platform, /已经有效的回答绝不重新抽样/);
+  assert.match(manifestRoute, /LEFT JOIN trial_results/);
+  assert.match(manifestRoute, /repair_attempted_at IS NULL/);
+  assert.match(manifestRoute, /item\.lastRetryable === true/);
+  assert.match(runRoute, /const retryable = !refusal/);
+  assert.match(workspaceRoute, /CREATE TABLE IF NOT EXISTS trial_manifest/);
+  assert.match(migration, /CREATE TABLE `trial_manifest`/);
+});
+
 test("starts every new batch at the next unused run index and defaults exports to all groups", async () => {
   const [platform, workspaceRoute] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),

@@ -87,3 +87,22 @@ export const trialAttempts = sqliteTable("trial_attempts", {
   latencyMs: integer("latency_ms").notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+export const trialManifest = sqliteTable("trial_manifest", {
+  logicalTrialId: text("logical_trial_id").primaryKey(),
+  batchId: text("batch_id").notNull(),
+  projectId: text("project_id").notNull(),
+  modelId: text("model_id").notNull(),
+  modelAlias: text("model_alias").notNull(),
+  taskType: text("task_type").notNull(),
+  runIndex: integer("run_index").notNull(),
+  stimulusId: text("stimulus_id").notNull(),
+  stimulusHex: text("stimulus_hex").notNull(),
+  stimulusIndex: integer("stimulus_index").notNull(),
+  modelJson: text("model_json").notNull(),
+  settingsJson: text("settings_json").notNull(),
+  maxRetryCount: integer("max_retry_count").notNull(),
+  createdAt: text("created_at").notNull(),
+  repairAttemptedAt: text("repair_attempted_at"),
+  completedAt: text("completed_at"),
+});

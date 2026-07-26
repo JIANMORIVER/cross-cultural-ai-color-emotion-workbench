@@ -51,8 +51,17 @@ async function ensureSchema() {
       retryable INTEGER NOT NULL, error_message TEXT NOT NULL, raw_response TEXT NOT NULL,
       latency_ms INTEGER NOT NULL, created_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS trial_manifest (
+      logical_trial_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, project_id TEXT NOT NULL,
+      model_id TEXT NOT NULL, model_alias TEXT NOT NULL, task_type TEXT NOT NULL,
+      run_index INTEGER NOT NULL, stimulus_id TEXT NOT NULL, stimulus_hex TEXT NOT NULL,
+      stimulus_index INTEGER NOT NULL, model_json TEXT NOT NULL, settings_json TEXT NOT NULL,
+      max_retry_count INTEGER NOT NULL, created_at TEXT NOT NULL,
+      repair_attempted_at TEXT, completed_at TEXT
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS trial_project_idx ON trial_results(project_id, task_type)"),
     db.prepare("CREATE INDEX IF NOT EXISTS attempt_project_idx ON trial_attempts(project_id, model_id, run_index)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS manifest_project_idx ON trial_manifest(project_id, model_id, run_index)"),
   ]);
 
   const settingsColumns = await db.prepare("PRAGMA table_info(experiment_settings)").all();
@@ -112,6 +121,9 @@ export async function GET() {
         UNION
         SELECT model_id, model_alias, run_index FROM trial_attempts
         WHERE project_id = ? AND run_index > 0
+        UNION
+        SELECT model_id, model_alias, run_index FROM trial_manifest
+        WHERE project_id = ? AND run_index > 0
       )
       SELECT g.model_id, g.model_alias, g.run_index,
         (SELECT COUNT(*) FROM trial_results r
@@ -136,11 +148,14 @@ export async function GET() {
         ) AS completed_at
       FROM run_groups g
       ORDER BY g.model_alias, g.run_index`)
-      .bind(PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID,
+      .bind(PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID,
         PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID).all(),
-    db.prepare(`SELECT COALESCE(MAX(run_index), 0) + 1 AS next_run_index
-      FROM trial_results
-      WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'`).bind(PROJECT_ID).first(),
+    db.prepare(`SELECT COALESCE(MAX(run_index), 0) + 1 AS next_run_index FROM (
+      SELECT run_index FROM trial_results
+      WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'
+      UNION ALL
+      SELECT run_index FROM trial_manifest WHERE project_id = ? AND run_index > 0
+    )`).bind(PROJECT_ID, PROJECT_ID).first(),
     db.prepare(`SELECT attempt_id, logical_trial_id, model_id, model_alias, task_type,
       run_index, stimulus_id, attempt_no, status, http_status, retryable,
       error_message, raw_response, latency_ms, created_at

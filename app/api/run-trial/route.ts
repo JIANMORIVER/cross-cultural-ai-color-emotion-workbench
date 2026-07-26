@@ -121,15 +121,16 @@ export async function POST(request: Request) {
     if (!rawResponse) {
       const refusal = payload.choices?.[0]?.message?.refusal;
       const finishReason = payload.choices?.[0]?.finish_reason;
+      const retryable = !refusal;
       const message = refusal
         ? `模型拒绝回答：${refusal}`
         : `模型响应中没有可读取的回答内容${finishReason ? `（finish_reason=${finishReason}）` : ""}。`;
       await saveAttempt({
         logicalTrialId, model: body.model, trial, attemptNo, status: "empty_response",
-        httpStatus: response.status, retryable: true, errorMessage: message,
+        httpStatus: response.status, retryable, errorMessage: message,
         rawResponse: payloadText, latencyMs: Date.now() - started,
       });
-      return Response.json({ ok: false, retryable: true, message, httpStatus: response.status }, { status: 422 });
+      return Response.json({ ok: false, retryable, message, httpStatus: response.status }, { status: 422 });
     }
 
     let clean: ReturnType<typeof parseColorResponse> | ReturnType<typeof parseAssociationResponse>;
@@ -181,6 +182,8 @@ export async function POST(request: Request) {
           "success", response.status, 0, "", rawResponse.slice(0, 12000),
           result.latency_ms, result.created_at,
         ),
+      env.DB.prepare("UPDATE trial_manifest SET completed_at = ? WHERE logical_trial_id = ?")
+        .bind(result.created_at, logicalTrialId),
     ]);
 
     return Response.json({ ok: true, result, latencyMs: result.latency_ms });

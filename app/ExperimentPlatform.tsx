@@ -9,6 +9,7 @@ import {
   buildExperimentConditionRows,
   buildSampleManifestRows,
   buildSampleRows,
+  buildTrialManifestRows,
   buildWordToColorRows,
   COLOR_TO_EMOTION_COLUMNS,
   SAMPLE_COLUMNS,
@@ -101,6 +102,22 @@ type FailureAttempt = {
   raw_response: string;
   latency_ms: number;
   created_at: string;
+};
+
+type RepairTrial = {
+  logicalTrialId: string;
+  batchId: string;
+  modelId: string;
+  modelAlias: string;
+  task: "word" | "color";
+  runIndex: number;
+  stimulusId: string;
+  stimulusHex: string;
+  stimulusIndex: number;
+  nextAttempt: number;
+  maxRetryCount: number;
+  model: Model;
+  settings: Settings;
 };
 
 const EMOTIONS = [
@@ -241,6 +258,10 @@ export function ExperimentPlatform() {
   const [modelRunProgress, setModelRunProgress] = useState<ModelRunProgress>({});
   const [lastRunError, setLastRunError] = useState("");
   const [runActivity, setRunActivity] = useState("");
+  const [repairTrials, setRepairTrials] = useState<RepairTrial[]>([]);
+  const [repairExhaustedCount, setRepairExhaustedCount] = useState(0);
+  const [repairChecking, setRepairChecking] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [groupSummaries, setGroupSummaries] = useState<RunGroupSummary[]>([]);
   const [recentFailures, setRecentFailures] = useState<FailureAttempt[]>([]);
   const [selectedExportGroups, setSelectedExportGroups] = useState<string[] | null>(null);
@@ -381,6 +402,8 @@ export function ExperimentPlatform() {
     setModelRunProgress(Object.fromEntries(runModels.map(model => [model.id, { completed: 0, valid: 0, word: 0, color: 0 }])));
     setLastRunError("");
     setRunActivity("");
+    setRepairTrials([]);
+    setRepairExhaustedCount(0);
   }
 
   function createTrialQueue(firstRunIndex: number, queueModels: Model[]) {
@@ -415,6 +438,148 @@ export function ExperimentPlatform() {
     setLaunchedModelIds([]);
     changeRunnerState("ready"); setPage("runner");
     persist("saveSettings", settings as unknown as Record<string, unknown>, `已准备 ${totalRequests.toLocaleString()} 个试次。`);
+  }
+
+  async function registerTrialManifest(queue: QueueTrial[], queueModels: Model[]) {
+    const batchId = `manifest-${Date.now()}-${crypto.randomUUID()}`;
+    for (const model of queueModels) {
+      const trials = queue.filter(item => item.model.id === model.id).map(item => ({
+        task: item.task,
+        runIndex: item.runIndex,
+        stimulusId: item.stimulusId,
+        stimulusHex: item.stimulusHex || "",
+        stimulusIndex: item.stimulusIndex,
+      }));
+      const response = await fetch("/api/trial-manifest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "register", batchId, model, settings, trials }),
+      });
+      const data = await response.json().catch(() => ({})) as { ok?: boolean; message?: string };
+      if (!response.ok || !data.ok) throw new Error(data.message || `${model.alias} 的试次清单保存失败。`);
+    }
+  }
+
+  async function scanMissingTrials(modelIds = [...launchedModelIdsRef.current]) {
+    if (!modelIds.length) {
+      setRepairTrials([]);
+      setRepairExhaustedCount(0);
+      return;
+    }
+    setRepairChecking(true);
+    try {
+      const response = await fetch("/api/trial-manifest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "list", modelIds }),
+      });
+      const data = await response.json().catch(() => ({})) as {
+        ok?: boolean;
+        repairable?: RepairTrial[];
+        exhaustedCount?: number;
+        message?: string;
+      };
+      if (!response.ok || !data.ok) throw new Error(data.message || "缺失试次检查失败。");
+      setRepairTrials(data.repairable || []);
+      setRepairExhaustedCount(Number(data.exhaustedCount || 0));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "缺失试次检查失败。");
+    } finally {
+      setRepairChecking(false);
+    }
+  }
+
+  async function repairMissingTrials() {
+    const candidates = [...repairTrials];
+    if (!candidates.length || repairing) return;
+    const missingKeys = [...new Set(candidates.filter(item => !keys[item.modelId]).map(item => item.modelAlias))];
+    if (missingKeys.length) {
+      setNotice(`补齐前请重新填写 ${missingKeys.join("、")} 的临时 API Key。`);
+      return;
+    }
+    setRepairing(true);
+    setNotice(`正在补齐 ${candidates.length} 条技术缺失；有效结果不会重新生成…`);
+    try {
+      const claimResponse = await fetch("/api/trial-manifest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "claim", logicalTrialIds: candidates.map(item => item.logicalTrialId) }),
+      });
+      const claim = await claimResponse.json().catch(() => ({})) as { ok?: boolean; claimed?: number; message?: string };
+      if (!claimResponse.ok || !claim.ok || Number(claim.claimed) !== candidates.length) {
+        throw new Error(claim.message || "部分缺失试次已被其他补齐任务占用，请重新检查。");
+      }
+      setRunStats(current => ({ ...current, retries: current.retries + candidates.length }));
+
+      let repaired = 0;
+      let unresolved = 0;
+      const groups = new Map<string, RepairTrial[]>();
+      candidates.forEach(item => groups.set(item.modelId, [...(groups.get(item.modelId) || []), item]));
+      await Promise.all([...groups.values()].map(async group => {
+        const model = group[0].model;
+        const interval = Math.ceil(60_000 / Math.max(1, Number(model.rate_limit) || 60));
+        for (let index = 0; index < group.length; index += 1) {
+          if (index) await new Promise(resolve => window.setTimeout(resolve, interval));
+          const item = group[index];
+          setRunActivity(`补齐 · ${item.modelAlias} · 第 ${item.runIndex} 轮 · ${item.stimulusId}`);
+          try {
+            const response = await fetch("/api/run-trial", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                apiKey: keys[item.modelId],
+                model: item.model,
+                settings: item.settings,
+                trial: {
+                  task: item.task,
+                  runIndex: item.runIndex,
+                  stimulusId: item.stimulusId,
+                  stimulusHex: item.stimulusHex,
+                  stimulusIndex: item.stimulusIndex,
+                },
+                retryCount: item.nextAttempt,
+              }),
+            });
+            const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: ResultRow };
+            if (!response.ok || !data.ok || !data.result) {
+              unresolved += 1;
+              continue;
+            }
+            repaired += 1;
+            const result = data.result;
+            setResults(current => [result, ...current.filter(row => row.trial_id !== result.trial_id)]);
+            setRunStats(current => ({
+              ...current,
+              valid: current.valid + 1,
+              failed: Math.max(0, current.failed - 1),
+              latencyTotal: current.latencyTotal + result.latency_ms,
+            }));
+            setModelRunProgress(current => {
+              const previous = current[item.modelId] || { completed: 0, valid: 0, word: 0, color: 0 };
+              return { ...current, [item.modelId]: { ...previous, valid: previous.valid + 1 } };
+            });
+          } catch {
+            unresolved += 1;
+          }
+        }
+      }));
+
+      const refreshResponse = await fetch("/api/workspace", { cache: "no-store" });
+      if (refreshResponse.ok) {
+        const refreshed = await refreshResponse.json();
+        if (refreshed.results) setResults(refreshed.results);
+        if (refreshed.groupSummaries) setGroupSummaries(refreshed.groupSummaries);
+        if (refreshed.recentFailures) setRecentFailures(refreshed.recentFailures);
+      }
+      await scanMissingTrials([...new Set(candidates.map(item => item.modelId))]);
+      setNotice(`补齐完成：新增 ${repaired} 条有效结果，仍缺失 ${unresolved} 条；所有尝试已保留在审计记录中。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "缺失项补齐失败。");
+    } finally {
+      setRepairing(false);
+      setRunActivity("");
+      window.setTimeout(() => setNotice(""), 5200);
+    }
   }
 
   async function startRun() {
@@ -470,6 +635,13 @@ export function ExperimentPlatform() {
       setNotice("当前设置没有生成可执行试次。");
       return;
     }
+    try {
+      await registerTrialManifest(queue, candidateModels);
+    } catch (error) {
+      releaseStarting();
+      setNotice(`${error instanceof Error ? error.message : "试次清单保存失败。"} 为避免无法审计缺失项，队列未启动。`);
+      return;
+    }
 
     if (!joining) {
       resetRunProgress();
@@ -510,7 +682,8 @@ export function ExperimentPlatform() {
 
     async function executeTrial(item: QueueTrial) {
       let lastMessage = "试次执行失败。";
-      for (let attempt = 0; attempt <= settings.max_retry; attempt += 1) {
+      const immediateRetryLimit = Math.max(0, settings.max_retry - 1);
+      for (let attempt = 0; attempt <= immediateRetryLimit; attempt += 1) {
         setRunActivity(`${item.model.alias} · 第 ${item.runIndex} 轮 · ${item.stimulusId} · ${attempt ? `第 ${attempt} 次重试` : "请求中"}`);
         await waitForRateLimit(item.model);
         const controller = new AbortController();
@@ -538,7 +711,7 @@ export function ExperimentPlatform() {
           if (response.ok && data.ok && data.result) return data.result;
           lastMessage = data.message || `请求失败（HTTP ${response.status}）`;
           if (data.retryable === false) break;
-          if (attempt < settings.max_retry) {
+          if (attempt < immediateRetryLimit) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
             const retryAfter = Number(data.retryAfter);
             await wait(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : Math.min(5000, 700 * 2 ** attempt));
@@ -547,7 +720,7 @@ export function ExperimentPlatform() {
           lastMessage = error instanceof DOMException && error.name === "AbortError"
             ? `请求超过 ${settings.timeout_seconds} 秒未完成`
             : error instanceof Error ? error.message : "网络请求失败。";
-          if (attempt < settings.max_retry) {
+          if (attempt < immediateRetryLimit) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
             await wait(Math.min(5000, 700 * 2 ** attempt));
           }
@@ -606,6 +779,7 @@ export function ExperimentPlatform() {
       } catch {
         // The saved server data remains authoritative and will refresh on the next page load.
       }
+      await scanMissingTrials([...launchedModelIdsRef.current]);
     }
   }
 
@@ -631,6 +805,7 @@ export function ExperimentPlatform() {
       export_scope: includeIncompleteExports ? "available" as const : "complete" as const,
       results: payload.results.filter(result => selected.has(runGroupKey(result.model_id, result.run_index))),
       failures: (payload.failures ?? []).filter(failure => selected.has(runGroupKey(failure.model_id, failure.run_index))),
+      manifest: (payload.manifest ?? []).filter(item => selected.has(runGroupKey(item.model_id, item.run_index))),
     };
   }
 
@@ -675,6 +850,7 @@ export function ExperimentPlatform() {
       XLSX.utils.book_append_sheet(workbook, sampleSheet, `SurveyResponse_AI_${new Date().toISOString().slice(0, 10).replaceAll("-", "")}`.slice(0, 31));
       XLSX.utils.book_append_sheet(workbook, formatWorkbookSheet(XLSX, buildSampleManifestRows(payload)), "row_manifest");
       XLSX.utils.book_append_sheet(workbook, formatWorkbookSheet(XLSX, buildExperimentConditionRows(payload)), "experiment_conditions");
+      XLSX.utils.book_append_sheet(workbook, formatWorkbookSheet(XLSX, buildTrialManifestRows(payload)), "trial_manifest");
       const safeName = project.name.replaceAll(/[^\p{L}\p{N}_-]+/gu, "_");
       const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
       XLSX.writeFile(workbook, `SurveyResponse_AI_${safeName}_${date}.xlsx`, { compression: true });
@@ -706,9 +882,10 @@ export function ExperimentPlatform() {
       XLSX.utils.book_append_sheet(workbook, toSourceSheet(wordRows), "多模型实验结果_词选色");
       XLSX.utils.book_append_sheet(workbook, toSourceSheet(colorRows), "多模型实验结果_色选词");
       XLSX.utils.book_append_sheet(workbook, formatWorkbookSheet(XLSX, buildExperimentConditionRows(payload)), "实验条件");
+      XLSX.utils.book_append_sheet(workbook, formatWorkbookSheet(XLSX, buildTrialManifestRows(payload)), "试次清单与补齐记录");
       const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
       XLSX.writeFile(workbook, `多模型实验结果_${date}.xlsx`, { compression: true });
-      setNotice(`原始多模型格式工作簿已生成：词选色 ${wordRows.length} 行、色选词 ${colorRows.length} 行；实验条件已单独记录。`);
+      setNotice(`原始多模型格式工作簿已生成：词选色 ${wordRows.length} 行、色选词 ${colorRows.length} 行；试次清单和补齐记录已附上。`);
     } catch {
       setNotice("原始多模型格式工作簿生成失败，请稍后重试。");
     } finally {
@@ -747,7 +924,7 @@ export function ExperimentPlatform() {
           {page === "setup" && <SetupPage project={project} setProject={setProject} save={() => persist("saveProject", project as unknown as Record<string, unknown>, "项目详情已保存。")} />}
           {page === "models" && <ModelsPage models={models} selected={selectedModel} select={setSelectedModelId} patch={patchModel} save={saveModel} apiKey={keys[selectedModel.id] || ""} setKey={setKey} testing={testing} test={testConnection} pilotTesting={pilotTesting} pilotTest={pilotTest} prepareSingle={() => prepareSingleModel(selectedModel.id)} />}
           {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} launchedModelIds={launchedModelIds} running={runnerState === "running"} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
-          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} pendingCount={pendingRunModels.length} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} lastError={lastRunError} activity={runActivity} />}
+          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} pendingCount={pendingRunModels.length} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} lastError={lastRunError} activity={runActivity} repairCount={repairTrials.length} repairExhaustedCount={repairExhaustedCount} repairChecking={repairChecking} repairing={repairing} scanMissing={() => scanMissingTrials(runModels.map(model => model.id))} repairMissing={repairMissingTrials} />}
           {page === "review" && <ReviewPage results={filteredResults} failures={recentFailures} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
           {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} includeIncomplete={includeIncompleteExports} setIncludeIncomplete={setIncludeIncompleteExports} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
           {page === "analysis" && <AnalysisPlatform />}
@@ -890,7 +1067,7 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
         </div>
         <label className="range-label"><span>每个模型的完整实验轮次<b>{settings.repetitions} 组</b></span><input type="range" min="1" max="100" value={settings.repetitions} disabled={running} onChange={e => patch({ repetitions: number(e.target.value) })} /><small><span>1 组测试数据</span><span>100 组正式数据</span></small></label>
         <div className="repetition-presets"><span>快速设置</span>{[1, 10, 50, 100].map(value => <button type="button" key={value} disabled={running} className={settings.repetitions === value ? "active" : ""} onClick={() => patch({ repetitions: value })}>{value} 组</button>)}</div>
-        <div className="compact-fields"><label>并行模型组<input type="number" readOnly value={activeModels.length} /></label><label>最大重试次数<input type="number" min="0" max="5" disabled={running} value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" disabled={running} value={settings.timeout_seconds} onChange={e => patch({ timeout_seconds: number(e.target.value) })} /></label></div>
+        <div className="compact-fields"><label>并行模型组<input type="number" readOnly value={activeModels.length} /></label><label>总重试上限（含补齐）<input type="number" min="0" max="5" disabled={running} value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" disabled={running} value={settings.timeout_seconds} onChange={e => patch({ timeout_seconds: number(e.target.value) })} /></label></div>
         <div className="order-controls">
           <div className="strategy-title"><div><span className="eyebrow">呈现顺序</span><b>可复现乱序</b></div><small>按基础 Seed 确定每轮顺序</small></div>
           <div className={bool(settings.shuffle_emotion_order) ? "order-row active" : "order-row"}><span>实验一</span><div><b>20 个情绪询问顺序乱序</b><small>每轮以不同顺序逐个询问情绪词，降低固定位置偏差。</small></div><Toggle checked={bool(settings.shuffle_emotion_order)} onChange={v => patch({ shuffle_emotion_order: v })} label="实验一情绪顺序乱序" disabled={running} /></div>
@@ -917,7 +1094,7 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
   </>;
 }
 
-function RunnerPage({ state, setState, start, pendingCount, total, stats, modelProgress, settings, models, launchedModelIds, keys, lastError, activity }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; pendingCount: number; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; launchedModelIds: string[]; keys: Record<string, string>; lastError: string; activity: string }) {
+function RunnerPage({ state, setState, start, pendingCount, total, stats, modelProgress, settings, models, launchedModelIds, keys, lastError, activity, repairCount, repairExhaustedCount, repairChecking, repairing, scanMissing, repairMissing }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; pendingCount: number; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; launchedModelIds: string[]; keys: Record<string, string>; lastError: string; activity: string; repairCount: number; repairExhaustedCount: number; repairChecking: boolean; repairing: boolean; scanMissing: () => void; repairMissing: () => void }) {
   const pct = total ? Math.min(100, stats.completed / total * 100) : 0;
   const wordTotal = bool(settings.run_word_to_color) ? settings.repetitions * 20 : 0;
   const colorTotal = bool(settings.run_color_to_emotion) ? settings.repetitions * 11 : 0;
@@ -929,6 +1106,7 @@ function RunnerPage({ state, setState, start, pendingCount, total, stats, modelP
       <div className="run-number"><span>总体进度</span><strong>{stats.completed.toLocaleString()} <em>/ {total.toLocaleString()}</em></strong><div className="progress"><i style={{ width: `${pct}%` }} /></div><small>已完成 {pct.toFixed(1)}% · {stateLabel}{stats.active ? ` · ${stats.active} 个请求处理中` : ""}</small>{activity ? <small className="run-activity">当前：{activity}</small> : null}</div>
       <div className="run-metrics"><div><span>✓</span><p><b>{stats.valid.toLocaleString()}</b><small>有效</small></p></div><div><span>↻</span><p><b>{stats.retries.toLocaleString()}</b><small>已重试</small></p></div><div><span>×</span><p><b>{stats.failed.toLocaleString()}</b><small>失败</small></p></div><div><span>⏱</span><p><b>{averageLatency ? `${averageLatency} ms` : "—"}</b><small>平均延迟</small></p></div></div>
     </section>
+    {state === "completed" || repairCount || repairExhaustedCount ? <section className="repair-panel panel"><div><span className="eyebrow">结束后完整性检查</span><h3>{repairCount ? `发现 ${repairCount} 条可补齐的技术缺失` : repairExhaustedCount ? `仍有 ${repairExhaustedCount} 条最终缺失` : "当前试次清单完整"}</h3><p>只补齐清单中没有有效结果的逻辑试次；已经有效的回答绝不重新抽样。补齐仅执行一次，并继续使用原模型、原参数、原 Prompt 和原轮次。</p></div><div className="repair-actions"><button className="secondary" onClick={scanMissing} disabled={repairChecking || repairing}>{repairChecking ? "检查中…" : "重新检查缺失项"}</button>{repairCount ? <button className="primary" onClick={repairMissing} disabled={repairing}>{repairing ? "补齐中…" : `补齐 ${repairCount} 条缺失`}</button> : null}</div></section> : null}
     <div className="two-columns runner-grid">
       <section className="panel">
         <div className="panel-head"><div><h3>独立模型实验组</h3><p>每组拥有独立限流、进度和结果分区。</p></div><Pill tone={state === "running" ? "blue" : "neutral"}>{state === "running" ? `${launchedModelIds.length} 组运行中` : "待机"}</Pill></div>
@@ -1000,7 +1178,7 @@ function ExportPage({ project, results, expectedGroups, groupSummaries, selected
       <article><span className="file-type csv">CSV</span><div><h3>实验材料</h3><p>用于组成 Prompt 的标准 20 个情绪词和 11 个匿名色码。</p><small>2 个 CSV 文件 · 现在可用</small></div><div className="split-buttons"><button onClick={() => exportCsv("emotions")}>情绪词 ↓</button><button onClick={() => exportCsv("colors")}>颜色 ↓</button></div></article>
       <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type data">源数据</span><div><h3>源格式实验结果</h3><p>词选色按“模型 × 重复轮次”合并，不再每个情绪一行；色选词保留完整评分 JSON。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 组` : "请先选择数据组"}</small></div><div className="split-buttons"><button disabled={!hasSelectedData || Boolean(exporting)} onClick={() => exportSourceCsv("word")}>{exporting === "word" ? "整理中…" : "导出选中词选色 ↓"}</button><button disabled={!hasSelectedData || Boolean(exporting)} onClick={() => exportSourceCsv("color")}>{exporting === "color" ? "整理中…" : "导出选中色选词 ↓"}</button></div></article>
       <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">样本</span><div><h3>按实验轮次导出</h3><p>每个模型的每次实验单独一行；抢救模式下缺失刺激项留空，Pilot 不会混入。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 行 · 计划总数 ${expectedGroups.toLocaleString()} 行` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSampleWorkbook}>{exporting === "sample" ? "正在生成…" : "导出选中轮次"} <span>↓</span></button></article>
-      <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">源文件</span><div><h3>原始多模型格式工作簿</h3><p>沿用豆包文件的 9 列主表布局，只包含上方勾选的模型和轮次。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 组 · 3 个工作表` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSourceWorkbook}>{exporting === "source" ? "正在生成…" : "导出选中源文件"} <span>↓</span></button></article>
+      <article className={hasSelectedData ? "" : "muted-card"}><span className="file-type xlsx">源文件</span><div><h3>原始多模型格式工作簿</h3><p>沿用豆包文件的 9 列主表布局，并附所选轮次的试次清单与补齐记录。</p><small>{hasSelectedData ? `本次导出 ${selectedCount} 组 · 4 个工作表` : "请先选择数据组"}</small></div><button disabled={!hasSelectedData || Boolean(exporting)} onClick={exportSourceWorkbook}>{exporting === "source" ? "正在生成…" : "导出选中源文件"} <span>↓</span></button></article>
     </div>
     <section className="export-manifest panel"><div className="panel-head"><div><h3>实验条件记录</h3><p>两种 XLSX 都记录 Temperature、Top P、最大输出长度、重复次数和 A/B/C 随机性方案开关；API Key 始终排除。</p></div><span className="manifest-id">可复现条件 · 源回答</span></div><div className="manifest-grid">{["sample_91_columns", "row_manifest", "experiment_conditions", "word_to_color_source", "color_to_emotion_source", "randomness_policy"].map((x, i) => <span key={x}><i>{String(i + 1).padStart(2, "0")}</i>{x}<b>{i < 3 || results.length ? "就绪" : "待生成"}</b></span>)}</div></section>
   </>;
