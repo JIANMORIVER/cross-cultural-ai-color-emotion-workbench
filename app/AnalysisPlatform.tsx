@@ -12,7 +12,7 @@ import {
   parseColorRows,
   parseGewRows,
   runBidirectionalConsistency,
-  runBidirectionalCohortTest,
+  runBidirectionalGroupComparison,
   runColorClustering,
   runColorDiversity,
   runCulturalBias,
@@ -110,7 +110,7 @@ const TASKS = [
   { id: "task2-human-ai", group: "实验二 · 扩展", title: "人类–AI 情绪轮对齐", description: "逐颜色寻找 AI 最接近的人类组，同时报告分布距离与轮廓相关。", output: "人类–AI 对齐表", space: "JSD + Pearson 相关" },
   { id: "task2-cohort-test", group: "实验二 · 推断", title: "人类–AI 来源级精确检验", description: "在每个来源内汇总颜色×情绪的选择率、条件强度与零值纳入强度，再做 4×4 来源级精确置换与 FDR 校正。", output: "三类效应与 p/q", space: "来源级 70种精确标签置换 + BH-FDR" },
   { id: "task-cross-bidirectional", group: "双向整合 · 探索", title: "双向一致性与非对称性", description: "将自由词选色按 CIEDE2000 映射到 11 个标准色，与色选词矩阵比较 Top-1/Top-3、Spearman、JSD、方向差与互惠强度。", output: "20×11 双向关联长表", space: "ΔE00 硬映射 + Spearman + JSD + P−Q" },
-  { id: "task-cross-cohort", group: "双向整合 · 推断", title: "人类–AI 双向来源级比较", description: "以来源为独立单位比较人类与 AI 的排序一致性、分布相似度、Top-1 和非对称性，执行精确置换与指标内 FDR。", output: "情绪×双向指标的组间效应与 p/q", space: "4×4 来源级精确置换 + BH-FDR" },
+  { id: "task-cross-groups", group: "双向整合 · 扩展", title: "八组双向指标两两比较", description: "保留4个人类组和4个AI组为8个独立组，对全部28个组对比较排序一致性、分布相似度、Top-1和非对称性轮廓。", output: "28组对×8指标的差值、MAE与相关", space: "8×8组间矩阵 · 20情绪轮廓" },
 ] as const;
 
 function download(name: string, content: string, type = "text/csv;charset=utf-8") {
@@ -587,7 +587,7 @@ export function AnalysisPlatform() {
       else if (id === "task2-pattern") result = runGewPatternSimilarity(gewData.rows);
       else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
       else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
-      else if (id === "task-cross-cohort") result = runBidirectionalCohortTest(bidirectionalData.rows);
+      else if (id === "task-cross-groups") result = runBidirectionalGroupComparison(bidirectionalData.rows);
       else result = bidirectionalData;
       if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
       setRuns(current => ({ ...current, [id]: { status: "completed", result } }));
@@ -606,7 +606,7 @@ export function AnalysisPlatform() {
     if (["task2-omnibus", "task2-pairwise", "task2-jsd", "task2-pattern"].includes(id)) return task2 && gewSources >= 2;
     if (id === "task2-human-ai") return task2 && gewData.rows.some(row => row.cohort === "human") && gewData.rows.some(row => row.cohort === "ai");
     if (id === "task2-cohort-test") return task2 && new Set(gewData.rows.filter(row => row.cohort === "human").map(row => row.source)).size >= 2 && new Set(gewData.rows.filter(row => row.cohort === "ai").map(row => row.source)).size >= 2;
-    if (id === "task-cross-cohort") return new Set(bidirectionalData.rows.filter(row => row["组类型"] === "human").map(row => row["来源"])).size >= 2 && new Set(bidirectionalData.rows.filter(row => row["组类型"] === "ai").map(row => row["来源"])).size >= 2;
+    if (id === "task-cross-groups") return new Set(bidirectionalData.rows.map(row => row["来源"])).size >= 2;
     if (id === "task-cross-bidirectional") return bidirectionalData.rows.length > 0;
     return id.startsWith("task1") ? task1 : task2;
   }
@@ -864,7 +864,7 @@ export function AnalysisPlatform() {
         </div>
         <p className="pipeline-assurance">即使按 1 → 7 依次点击，每个单元也都从同一份未舍入的标准化内存数据读取，不会把上一项导出的 HSL、HSV 或 Lab 表再次误解析。</p>
       </section>
-      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "以关联概率和条件强度为主线，保留完整 0–5 等级分布，并补充广度、效价偏向、220 维模式相似性及 Bootstrap 区间。" : "仅在同一来源同时包含词选色和色选词时启用；分别比较关联概率、条件强度与零值计入的综合强度，作为群体层面的探索性结构分析。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
+      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "以8个试验组为独立比较单位，覆盖全部28个组对；同时保留关联概率、条件强度、0–5分布、220维模式与Bootstrap区间。" : "同一组同时包含词选色和色选词时启用；8组独立展示并比较全部28个组对，人类/AI只作为标签，不在默认分析中合并。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
         const available = taskAvailable(task.id), run = runs[task.id] || { status: "idle" as const };
         return <article key={task.id} className={`analysis-task-card ${available ? "available" : "disabled"} ${run.status}`}>
           <div className="task-card-top"><span>{String(index + 1).padStart(2, "0")}{task.group.includes("扩展") ? <small>扩展</small> : task.group.includes("推断") ? <small>推断</small> : task.group.includes("探索") ? <small>探索</small> : null}</span><em className={`run-state ${run.status}`}>{run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : run.status === "error" ? "需检查" : available ? "可运行" : "不适用"}</em></div>
@@ -908,13 +908,13 @@ function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColor
 }
 
 function Task2Dashboard({ rawRows, visibleEmotion, fileName }: { rawRows: GewRow[]; visibleEmotion?: string; fileName: string }) {
+  const sources = new Set(rawRows.map(row => row.source));
   const humanSources = new Set(rawRows.filter(row => row.cohort === "human").map(row => row.source));
   const aiSources = new Set(rawRows.filter(row => row.cohort === "ai").map(row => row.source));
-  const cohortRows = humanSources.size && aiSources.size ? runHumanAiGewCohortTest(rawRows).rows : [];
-  const rateSignificant = cohortRows.filter(row => row["选择率FDR_q值"] !== null && Number(row["选择率FDR_q值"]) < .05).length;
-  const conditionalSignificant = cohortRows.filter(row => row["条件强度FDR_q值"] !== null && Number(row["条件强度FDR_q值"]) < .05).length;
+  const pairwiseRows = sources.size >= 2 ? runGewPairwise(rawRows).rows : [];
+  const significantPairs = pairwiseRows.filter(row => row["FDR_q值"] !== null && Number(row["FDR_q值"]) < .05).length;
   return <>
-    <div className="dashboard-kpis"><article><span>人类来源</span><strong>{humanSources.size}</strong><small>来源作为独立比较单位</small></article><article><span>AI 来源</span><strong>{aiSources.size}</strong><small>与人类来源等权</small></article><article><span>选择率组间差异</span><strong>{cohortRows.length ? rateSignificant : "—"}</strong><small>FDR q&lt;.05 的颜色×情绪单元</small></article><article><span>条件强度组间差异</span><strong>{cohortRows.length ? conditionalSignificant : "—"}</strong><small>FDR q&lt;.05 的颜色×情绪单元</small></article></div>
+    <div className="dashboard-kpis"><article><span>独立试验组</span><strong>{sources.size}</strong><small>{humanSources.size}个人类组 + {aiSources.size}个AI组</small></article><article><span>全部组对</span><strong>{sources.size * (sources.size - 1) / 2}</strong><small>8组时共28个两两比较</small></article><article><span>组对×分析单元</span><strong>{pairwiseRows.length.toLocaleString()}</strong><small>颜色×情绪×来源对</small></article><article><span>选择率显著组对单元</span><strong>{pairwiseRows.length ? significantPairs : "—"}</strong><small>全部两两检验统一 BH-FDR</small></article></div>
     <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} />
   </>;
 }

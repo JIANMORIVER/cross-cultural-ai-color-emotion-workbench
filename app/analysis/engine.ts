@@ -1188,7 +1188,7 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
   };
 }
 
-export function runBidirectionalCohortTest(rows: ExportRow[]): AnalysisResult {
+export function runBidirectionalGroupComparison(rows: ExportRow[]): AnalysisResult {
   const unique = new Map<string, ExportRow>();
   rows.forEach(row => {
     const source = String(row["来源"] || ""), emotion = String(row["情绪"] || "");
@@ -1204,33 +1204,35 @@ export function runBidirectionalCohortTest(rows: ExportRow[]): AnalysisResult {
     { key: "top1", label: "Top1相互首选率", read: row => row["Top1相互首选"] === null || row["Top1相互首选"] === undefined ? null : row["Top1相互首选"] ? 1 : 0 },
     { key: "asymmetry", label: "平均绝对非对称", read: row => finiteExportNumber(row["平均绝对非对称"]) },
   ];
+  const sources = [...new Set([...unique.values()].map(row => String(row["来源"] || "")))].filter(Boolean);
+  const cohortFor = (source: string) => String([...unique.values()].find(row => row["来源"] === source)?.["组类型"] || "unspecified");
   const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
-  const raw = metrics.flatMap(metric => GEW_EMOTIONS.flatMap(emotion => {
-    const emotionRows = [...unique.values()].filter(row => row["情绪"] === emotion);
-    const human = emotionRows.filter(row => row["组类型"] === "human").map(metric.read).filter((value): value is number => value !== null);
-    const ai = emotionRows.filter(row => row["组类型"] === "ai").map(metric.read).filter((value): value is number => value !== null);
-    if (!human.length || !ai.length) return [];
-    return [{ metric, emotion, human, ai, difference: mean(ai) - mean(human), p: exactScalarPermutationP([...human, ...ai], human.length) }];
-  }));
-  const adjustedByMetric = new Map<string, number[]>();
-  metrics.forEach(metric => adjustedByMetric.set(metric.key, bh(raw.filter(item => item.metric.key === metric.key).map(item => item.p).filter(Number.isFinite))));
-  const metricIndices = new Map(metrics.map(metric => [metric.key, 0]));
-  const output: ExportRow[] = raw.map(item => {
-    const index = metricIndices.get(item.metric.key) || 0, adjusted = adjustedByMetric.get(item.metric.key) || [];
-    metricIndices.set(item.metric.key, index + 1);
-    return {
-      指标: item.metric.label, 情绪: item.emotion,
-      人类来源数: item.human.length, AI来源数: item.ai.length,
-      人类来源均值: round(mean(item.human), 6), AI来源均值: round(mean(item.ai), 6),
-      AI减人类差: round(item.difference, 6),
-      来源级精确置换p值: Number.isFinite(item.p) ? round(item.p, 6) : null,
-      指标内20情绪FDR_q值: Number.isFinite(adjusted[index]) ? round(adjusted[index], 6) : null,
-    };
-  });
+  const output: ExportRow[] = [];
+  metrics.forEach(metric => sources.forEach((sourceA, sourceIndex) => sources.slice(sourceIndex + 1).forEach(sourceB => {
+    const pairs = GEW_EMOTIONS.flatMap(emotion => {
+      const a = metric.read(unique.get(`${sourceA}\u0000${emotion}`) || {}), b = metric.read(unique.get(`${sourceB}\u0000${emotion}`) || {});
+      return a === null || b === null ? [] : [{ a, b }];
+    });
+    if (!pairs.length) return;
+    const vectorA = pairs.map(pair => pair.a), vectorB = pairs.map(pair => pair.b);
+    const differences = pairs.map(pair => pair.a - pair.b);
+    const correlation = validCorrelation(vectorA, vectorB);
+    output.push({
+      指标: metric.label,
+      来源A: sourceA, A组类型: cohortFor(sourceA),
+      来源B: sourceB, B组类型: cohortFor(sourceB),
+      有效情绪数: pairs.length,
+      A跨情绪均值: round(mean(vectorA), 6),
+      B跨情绪均值: round(mean(vectorB), 6),
+      A减B平均差: round(mean(differences), 6),
+      平均绝对差_MAE: round(mean(differences.map(Math.abs)), 6),
+      情绪轮廓Pearson_r: Number.isFinite(correlation) ? round(correlation, 6) : null,
+    });
+  })));
   return {
-    id: "task-cross-cohort", title: "双向整合人类–AI来源级比较", kind: "statistics", rows: output,
-    summary: [{ label: "指标", value: String(metrics.length) }, { label: "情绪×指标", value: String(output.length) }, { label: "分析单位", value: "来源" }],
-    note: "对每个来源先保留一个来源×情绪双向指标，再比较人类来源与AI来源。每项使用双侧精确标签置换；排序一致性、分布相似度、Top-1和非对称性分别在20个情绪内做BH-FDR。该检验以来源为独立单位，不解释为参与者级回认差异。",
+    id: "task-cross-groups", title: "双向整合八组两两比较", kind: "matrix", rows: output,
+    summary: [{ label: "组数", value: String(sources.length) }, { label: "组对", value: String(sources.length * (sources.length - 1) / 2) }, { label: "指标", value: String(metrics.length) }],
+    note: "把4个人类组和4个AI组保留为8个独立组，对全部28个组对比较20情绪双向指标轮廓，输出组间平均差、MAE与Pearson相关。人类/AI仅作为组标签，不在本分析中合并。由于双向指标已是组级聚合，结果按描述性来源比较解释，不伪造参与者级显著性。",
   };
 }
 

@@ -1,12 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, type ExportRow } from "./engine";
 
-type View = "cohort" | "cohortHeatmap" | "paired" | "symmetry" | "asymmetry" | "scatter";
+type View = "groups" | "groupMatrix" | "pairDifference" | "paired" | "symmetry" | "asymmetry" | "scatter";
 type QMetric = "probability" | "conditional" | "overall";
 type CohortSummaryMetric = "rank" | "jsd" | "top1" | "asymmetry";
-type CohortCellMetric = "p" | "q" | "gap" | "harmony";
 const Q_METRICS: Record<QMetric, { label: string; field: string; rank: string; jsd: string }> = {
   probability: { label: "关联概率", field: "色选词归一化概率", rank: "情绪颜色排序Spearman_概率", jsd: "JSD相似度_关联概率" },
   conditional: { label: "条件强度", field: "色选词归一化条件强度", rank: "情绪颜色排序Spearman_条件强度", jsd: "JSD相似度_条件强度" },
@@ -29,11 +28,10 @@ function cohortLabel(value: string) { return value === "human" ? "人类" : valu
 export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
   const sources = useMemo(() => [...new Set(rows.map(row => labelOf(row, "来源")))].filter(Boolean), [rows]);
   const sourceCohorts = useMemo(() => new Map(sources.map(source => [source, labelOf(rows.find(row => labelOf(row, "来源") === source) || {}, "组类型")])), [rows, sources]);
-  const humanSources = sources.filter(source => sourceCohorts.get(source) === "human");
-  const aiSources = sources.filter(source => sourceCohorts.get(source) === "ai");
   const [selectedSource, setSelectedSource] = useState("");
   const [selectedEmotion, setSelectedEmotion] = useState("");
-  const [view, setView] = useState<View>("cohort");
+  const [selectedA, setSelectedA] = useState(""), [selectedB, setSelectedB] = useState("");
+  const [view, setView] = useState<View>("groups");
   const [qMetric, setQMetric] = useState<QMetric>("probability");
   const source = sources.includes(selectedSource) ? selectedSource : sources[0] || "";
   const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => labelOf(row, "情绪") === emotion));
@@ -47,46 +45,49 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
     const row = rows.find(candidate => labelOf(candidate, "来源") === item && labelOf(candidate, "情绪") === itemEmotion);
     return row ? [row] : [];
   }));
-  const cohortMean = (cohort: "human" | "ai", field: string, boolean = false) => {
-    const values = uniqueSourceEmotionRows.filter(row => labelOf(row, "组类型") === cohort).flatMap(row => {
-      if (boolean) return [row[field] ? 1 : 0];
-      const value = optionalNumberOf(row, field);
-      return value === null ? [] : [value];
-    });
-    return values.length ? average(values) : null;
-  };
-  const groupKpis = [
-    { label: "排序一致性", human: cohortMean("human", Q_METRICS[qMetric].rank), ai: cohortMean("ai", Q_METRICS[qMetric].rank), note: `${Q_METRICS[qMetric].label} · Spearman` },
-    { label: "分布相似度", human: cohortMean("human", Q_METRICS[qMetric].jsd), ai: cohortMean("ai", Q_METRICS[qMetric].jsd), note: `${Q_METRICS[qMetric].label} · 1−JSD` },
-    { label: "Top-1 相互首选率", human: cohortMean("human", "Top1相互首选", true), ai: cohortMean("ai", "Top1相互首选", true), note: "情绪 ⇄ 标准色" },
-    { label: "平均绝对非对称", human: cohortMean("human", "平均绝对非对称"), ai: cohortMean("ai", "平均绝对非对称"), note: "mean |P−Q| · 综合口径" },
-  ];
+  const effectiveA = sources.includes(selectedA) ? selectedA : (sources[0] || "");
+  const effectiveB = sources.includes(selectedB) && selectedB !== effectiveA ? selectedB : (sources.find(item => item !== effectiveA) || "");
+  const groupSummaries = sources.map(item => {
+    const sourceRows = uniqueSourceEmotionRows.filter(row => labelOf(row, "来源") === item);
+    const meanField = (field: string) => {
+      const values = sourceRows.flatMap(row => { const value = optionalNumberOf(row, field); return value === null ? [] : [value]; });
+      return values.length ? average(values) : null;
+    };
+    return {
+      source: item, cohort: sourceCohorts.get(item) || "unspecified",
+      rank: meanField(Q_METRICS[qMetric].rank), jsd: meanField(Q_METRICS[qMetric].jsd),
+      top1: sourceRows.length ? average(sourceRows.map(row => row["Top1相互首选"] ? 1 : 0)) : null,
+      asymmetry: meanField("平均绝对非对称"),
+    };
+  });
 
   if (!rows.length) return <div className="dashboard-empty"><span>⇄</span><b>需要同一来源的两项实验数据</b><small>词选色和色选词都存在时，平台才会生成群体层面的双向一致性。</small></div>;
 
   return <section className="bidirectional-lab panel">
     <div className="panel-head bidirectional-head">
-      <div><span className="eyebrow">BETWEEN-GROUP BIDIRECTIONAL CONSISTENCY</span><h3>人类组与 AI 组双向关联比较</h3><p>默认以来源为独立单位比较人类与 AI；选择具体来源的图表保留在后面的下钻视图中。</p></div>
-      {!["cohort", "cohortHeatmap", "paired"].includes(view) ? <label>来源<select value={source} onChange={event => setSelectedSource(event.target.value)}>{sources.map(item => <option key={item}>{item}</option>)}</select></label> : <label>Q 口径<select value={qMetric} onChange={event => setQMetric(event.target.value as QMetric)}>{Object.entries(Q_METRICS).map(([key, item]) => <option value={key} key={key}>{item.label}</option>)}</select></label>}
+      <div><span className="eyebrow">EIGHT-GROUP BIDIRECTIONAL COMPARISON</span><h3>四个人类组与四个 AI 组双向比较</h3><p>8个试验组全部保留为独立比较单位；人类/AI只作为组标签，不在默认看板中合并。</p></div>
+      {!["groups", "groupMatrix", "pairDifference", "paired"].includes(view) ? <label>来源<select value={source} onChange={event => setSelectedSource(event.target.value)}>{sources.map(item => <option key={item}>{item}</option>)}</select></label> : <label>Q 口径<select value={qMetric} onChange={event => setQMetric(event.target.value as QMetric)}>{Object.entries(Q_METRICS).map(([key, item]) => <option value={key} key={key}>{item.label}</option>)}</select></label>}
     </div>
     <div className="visual-tabs" role="tablist" aria-label="双向一致性视图">
-      <button className={view === "cohort" ? "active" : ""} onClick={() => setView("cohort")}>人类–AI 组间总览</button>
-      <button className={view === "cohortHeatmap" ? "active" : ""} onClick={() => setView("cohortHeatmap")}>AI−人类差值热图</button>
+      <button className={view === "groups" ? "active" : ""} onClick={() => setView("groups")}>八组情绪指标总览</button>
+      <button className={view === "groupMatrix" ? "active" : ""} onClick={() => setView("groupMatrix")}>8×8 组间矩阵</button>
+      <button className={view === "pairDifference" ? "active" : ""} onClick={() => setView("pairDifference")}>任选两组差值</button>
       <button className={view === "paired" ? "active" : ""} onClick={() => setView("paired")}>八来源 P / Q 明细</button>
       <button className={view === "symmetry" ? "active" : ""} onClick={() => setView("symmetry")}>单来源情绪一致性</button>
       <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图（综合）</button>
       <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点（综合）</button>
     </div>
     <div className="bidirectional-canvas">
-      {view === "cohort" ? <CohortOverview rows={uniqueSourceEmotionRows} qMetric={qMetric} humanSources={humanSources} aiSources={aiSources} /> : null}
-      {view === "cohortHeatmap" ? <CohortBidirectionalHeatmap rows={rows} qMetric={qMetric} /> : null}
+      {view === "groups" ? <EightGroupOverview rows={uniqueSourceEmotionRows} qMetric={qMetric} sources={sources} sourceCohorts={sourceCohorts} /> : null}
+      {view === "groupMatrix" ? <BidirectionalGroupMatrix rows={uniqueSourceEmotionRows} qMetric={qMetric} sources={sources} sourceCohorts={sourceCohorts} /> : null}
+      {view === "pairDifference" ? <BidirectionalPairDifference rows={rows} qMetric={qMetric} sourceA={effectiveA} sourceB={effectiveB} sources={sources} onSourceA={setSelectedA} onSourceB={setSelectedB} /> : null}
       {view === "paired" ? <PairedProbabilityFacets rows={rows} emotion={emotion} emotions={emotions} onEmotionChange={setSelectedEmotion} qMetric={qMetric} onQMetricChange={setQMetric} sourceCohorts={sourceCohorts} /> : null}
       {view === "symmetry" ? <SymmetryPlot rows={emotionRows} qMetric={qMetric} /> : null}
       {view === "asymmetry" ? <AsymmetryHeatmap rows={visible} /> : null}
       {view === "scatter" ? <BidirectionalScatter rows={visible} /> : null}
     </div>
-    <div className="bidirectional-kpis group-kpis">{groupKpis.map(item => <article key={item.label}><span>{item.label}</span><div><em>人类 <b>{item.human === null ? "—" : item.human.toFixed(3)}</b></em><em>AI <b>{item.ai === null ? "—" : item.ai.toFixed(3)}</b></em></div><strong>{item.human === null || item.ai === null ? "差值 —" : `AI−人类 ${(item.ai - item.human) >= 0 ? "+" : ""}${(item.ai - item.human).toFixed(3)}`}</strong><small>{item.note}</small></article>)}</div>
-    <p className="chart-note">组间汇总以来源×情绪为单位，四个人类来源和四个 AI 来源等权；这是来源层面的探索性结构比较，不是同一参与者或同一 run 的回认率。</p>
+    <div className="bidirectional-group-summaries">{groupSummaries.map(item => <article key={item.source}><header><b>{item.source}</b><small className={`cohort-tag ${item.cohort}`}>{cohortLabel(item.cohort)}</small></header><div><span>ρ <strong>{item.rank === null ? "—" : item.rank.toFixed(3)}</strong></span><span>1−JSD <strong>{item.jsd === null ? "—" : item.jsd.toFixed(3)}</strong></span><span>Top-1 <strong>{item.top1 === null ? "—" : `${(item.top1 * 100).toFixed(1)}%`}</strong></span><span>|P−Q| <strong>{item.asymmetry === null ? "—" : item.asymmetry.toFixed(3)}</strong></span></div></article>)}</div>
+    <p className="chart-note">每张摘要卡对应一个独立试验组，共8组；切换Q口径会同步更新排序一致性和分布相似度。双向整合为组级结构比较，不解释为同一参与者的回认率。</p>
   </section>;
 }
 
@@ -97,53 +98,78 @@ const COHORT_SUMMARY_METRICS: Record<CohortSummaryMetric, { label: string; minim
   asymmetry: { label: "平均绝对非对称", minimum: 0, maximum: 1 },
 };
 
-function CohortOverview({ rows, qMetric, humanSources, aiSources }: { rows: ExportRow[]; qMetric: QMetric; humanSources: string[]; aiSources: string[] }) {
+function metricValue(row: ExportRow, metric: CohortSummaryMetric, qMetric: QMetric) {
+  return metric === "rank" ? optionalNumberOf(row, Q_METRICS[qMetric].rank) : metric === "jsd" ? optionalNumberOf(row, Q_METRICS[qMetric].jsd) : metric === "top1" ? (row["Top1相互首选"] ? 1 : 0) : optionalNumberOf(row, "平均绝对非对称");
+}
+
+function EightGroupOverview({ rows, qMetric, sources, sourceCohorts }: { rows: ExportRow[]; qMetric: QMetric; sources: string[]; sourceCohorts: Map<string, string> }) {
   const [metric, setMetric] = useState<CohortSummaryMetric>("rank");
   const config = COHORT_SUMMARY_METRICS[metric];
-  const rowValue = (row: ExportRow) => metric === "rank" ? optionalNumberOf(row, Q_METRICS[qMetric].rank) : metric === "jsd" ? optionalNumberOf(row, Q_METRICS[qMetric].jsd) : metric === "top1" ? (row["Top1相互首选"] ? 1 : 0) : optionalNumberOf(row, "平均绝对非对称");
-  const position = (value: number) => (value - config.minimum) / (config.maximum - config.minimum) * 100;
-  if (!humanSources.length || !aiSources.length) return <div className="group-comparison-empty"><b>缺少完整的人类 / AI 来源标记</b><span>请确保上传数据中的组类型列可识别为 human 与 ai，并在顶部保留“全部来源”筛选。</span></div>;
-  return <div className="cohort-overview">
-    <div className="cohort-view-head"><div><span>BETWEEN-GROUP FIRST</span><h4>20 个情绪的人类–AI 来源分布</h4><p>每个圆点是一个来源；横线分别连接人类和 AI 的来源等权均值。重点比较组间位置，同时保留组内离散程度。</p></div><label>比较指标<select value={metric} onChange={event => setMetric(event.target.value as CohortSummaryMetric)}>{Object.entries(COHORT_SUMMARY_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label></div>
-    <div className="cohort-source-legend"><span><i className="human" />人类来源（n={humanSources.length}）</span><span><i className="ai" />AI 来源（n={aiSources.length}）</span><small>{metric === "rank" || metric === "jsd" ? `当前 Q：${Q_METRICS[qMetric].label}` : "综合强度口径"}</small></div>
-    <div className="cohort-emotion-table">
-      <header><b>情绪</b><span>人类来源分布</span><strong>人类均值</strong><span>AI 来源分布</span><strong>AI 均值</strong><em>AI−人类</em></header>
-      {GEW_EMOTIONS.map(emotion => {
-        const emotionRows = rows.filter(row => labelOf(row, "情绪") === emotion);
-        const human = emotionRows.filter(row => labelOf(row, "组类型") === "human").map(row => ({ source: labelOf(row, "来源"), value: rowValue(row) })).filter((item): item is { source: string; value: number } => item.value !== null);
-        const ai = emotionRows.filter(row => labelOf(row, "组类型") === "ai").map(row => ({ source: labelOf(row, "来源"), value: rowValue(row) })).filter((item): item is { source: string; value: number } => item.value !== null);
-        const humanMean = human.length ? average(human.map(item => item.value)) : null, aiMean = ai.length ? average(ai.map(item => item.value)) : null;
-        return <article key={emotion}><b>{emotion}</b><div className="cohort-mini-track">{metric === "rank" ? <i className="zero" /> : null}{human.map(item => <em className="human" key={item.source} style={{ left: `${position(item.value)}%` }} title={`${item.source}: ${item.value.toFixed(3)}`} />)}{humanMean !== null ? <strong className="human-mean" style={{ left: `${position(humanMean)}%` }} /> : null}</div><strong>{humanMean === null ? "—" : humanMean.toFixed(3)}</strong><div className="cohort-mini-track">{metric === "rank" ? <i className="zero" /> : null}{ai.map(item => <em className="ai" key={item.source} style={{ left: `${position(item.value)}%` }} title={`${item.source}: ${item.value.toFixed(3)}`} />)}{aiMean !== null ? <strong className="ai-mean" style={{ left: `${position(aiMean)}%` }} /> : null}</div><strong>{aiMean === null ? "—" : aiMean.toFixed(3)}</strong><i className={humanMean !== null && aiMean !== null && aiMean - humanMean >= 0 ? "positive" : "negative"}>{humanMean === null || aiMean === null ? "—" : `${aiMean - humanMean >= 0 ? "+" : ""}${(aiMean - humanMean).toFixed(3)}`}</i></article>;
-      })}
-    </div>
+  const ordered = [...sources].sort((a, b) => {
+    const rank = (source: string) => sourceCohorts.get(source) === "human" ? 0 : sourceCohorts.get(source) === "ai" ? 1 : 2;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
+  return <div className="eight-group-overview">
+    <div className="cohort-view-head"><div><span>8 GROUPS × 20 EMOTIONS</span><h4>八组双向指标热图</h4><p>每列是一个独立试验组，每行是一个情绪；同一指标使用统一尺度，可直接横向比较八组。</p></div><label>比较指标<select value={metric} onChange={event => setMetric(event.target.value as CohortSummaryMetric)}>{Object.entries(COHORT_SUMMARY_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label></div>
+    <div className="eight-group-emotion-grid" style={{ gridTemplateColumns: `125px repeat(${ordered.length},minmax(82px,1fr))` }}>
+      <span />{ordered.map(source => <b className={`cohort-${sourceCohorts.get(source)}`} key={source}>{source}<small>{cohortLabel(sourceCohorts.get(source) || "")}</small></b>)}
+      {GEW_EMOTIONS.map(emotion => <div className="grid-row" key={emotion}><strong>{emotion}</strong>{ordered.map(source => {
+        const row = rows.find(item => labelOf(item, "来源") === source && labelOf(item, "情绪") === emotion), value = row ? metricValue(row, metric, qMetric) : null;
+        const normalized = value === null ? 0 : (value - config.minimum) / (config.maximum - config.minimum);
+        const background = value === null ? "#f0f2f0" : metric === "rank" && value < 0 ? `rgba(190,88,67,${.08 + Math.abs(value) * .82})` : `rgba(39,123,146,${.08 + Math.max(0, normalized) * .82})`;
+        return <i key={source} style={{ background }} title={`${source} · ${emotion}: ${value === null ? "—" : value.toFixed(3)}`}><span>{value === null ? "—" : value.toFixed(2)}</span></i>;
+      })}</div>)}
+    </div><p className="chart-note">{metric === "rank" || metric === "jsd" ? `当前 Q 口径：${Q_METRICS[qMetric].label}` : "Top-1与非对称性使用综合强度口径。"} 人类/AI颜色标签仅帮助识别，不参与合并计算。</p>
   </div>;
 }
 
-function CohortBidirectionalHeatmap({ rows, qMetric }: { rows: ExportRow[]; qMetric: QMetric }) {
-  const [metric, setMetric] = useState<CohortCellMetric>("gap");
-  const metricLabels: Record<CohortCellMetric, string> = { p: "词选色 P", q: `色选词 Q（${Q_METRICS[qMetric].label}）`, gap: "方向差 P−Q", harmony: "双向调和强度" };
-  const valueOfRow = (row: ExportRow) => {
-    const p = numberOf(row, "词选色概率_P"), q = numberOf(row, Q_METRICS[qMetric].field);
-    return metric === "p" ? p : metric === "q" ? q : metric === "gap" ? p - q : p + q ? 2 * p * q / (p + q) : 0;
+function profileCorrelation(a: number[], b: number[]) {
+  if (a.length < 2 || a.length !== b.length) return null;
+  const meanA = average(a), meanB = average(b);
+  const numerator = a.reduce((sum, value, index) => sum + (value - meanA) * (b[index] - meanB), 0);
+  const denominator = Math.sqrt(a.reduce((sum, value) => sum + (value - meanA) ** 2, 0) * b.reduce((sum, value) => sum + (value - meanB) ** 2, 0));
+  return denominator ? numerator / denominator : null;
+}
+
+function BidirectionalGroupMatrix({ rows, qMetric, sources, sourceCohorts }: { rows: ExportRow[]; qMetric: QMetric; sources: string[]; sourceCohorts: Map<string, string> }) {
+  const [metric, setMetric] = useState<CohortSummaryMetric>("rank");
+  const [mode, setMode] = useState<"difference" | "mae" | "correlation">("mae");
+  const ordered = [...sources].sort((a, b) => (sourceCohorts.get(a) === "human" ? 0 : 1) - (sourceCohorts.get(b) === "human" ? 0 : 1) || a.localeCompare(b));
+  const vectors = new Map(ordered.map(source => [source, GEW_EMOTIONS.map(emotion => {
+    const row = rows.find(item => item["来源"] === source && item["情绪"] === emotion);
+    return row ? metricValue(row, metric, qMetric) : null;
+  })]));
+  const compare = (a: string, b: string) => {
+    const pairs = (vectors.get(a) || []).flatMap((value, index) => value === null || vectors.get(b)?.[index] === null ? [] : [{ a: value, b: vectors.get(b)![index] as number }]);
+    if (!pairs.length) return null;
+    if (mode === "difference") return average(pairs.map(pair => pair.a - pair.b));
+    if (mode === "mae") return average(pairs.map(pair => Math.abs(pair.a - pair.b)));
+    return profileCorrelation(pairs.map(pair => pair.a), pairs.map(pair => pair.b));
   };
-  const cellDifference = (emotion: string, code: string) => {
-    const cellRows = rows.filter(row => labelOf(row, "情绪") === emotion && labelOf(row, "标准色码") === code);
-    const human = cellRows.filter(row => labelOf(row, "组类型") === "human").map(valueOfRow), ai = cellRows.filter(row => labelOf(row, "组类型") === "ai").map(valueOfRow);
-    return human.length && ai.length ? average(ai) - average(human) : null;
+  const values = ordered.flatMap(a => ordered.map(b => a === b ? null : compare(a, b))).filter((value): value is number => value !== null);
+  const limit = Math.max(.01, ...values.map(Math.abs));
+  return <div className="bidirectional-group-matrix-wrap"><div className="cohort-view-head"><div><span>ALL 28 GROUP PAIRS</span><h4>八组双向指标矩阵</h4><p>覆盖8组的全部28个组对；可比较跨20情绪的平均差、平均绝对差或轮廓相关。</p></div><div className="paired-display-controls"><label>指标<select value={metric} onChange={event => setMetric(event.target.value as CohortSummaryMetric)}>{Object.entries(COHORT_SUMMARY_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label><label>矩阵值<select value={mode} onChange={event => setMode(event.target.value as typeof mode)}><option value="mae">平均绝对差 MAE</option><option value="difference">行组−列组平均差</option><option value="correlation">20情绪轮廓相关</option></select></label></div></div>
+    <div className="eight-group-matrix" style={{ gridTemplateColumns: `135px repeat(${ordered.length},minmax(74px,1fr))` }}><span />{ordered.map(source => <b className={`cohort-${sourceCohorts.get(source)}`} key={source}>{source}<small>{cohortLabel(sourceCohorts.get(source) || "")}</small></b>)}{ordered.map(a => <Fragment key={a}><strong className={`cohort-${sourceCohorts.get(a)}`}>{a}<small>{cohortLabel(sourceCohorts.get(a) || "")}</small></strong>{ordered.map(b => {
+      if (a === b) return <i className="diagonal" key={`${a}-${b}`}>—</i>;
+      const value = compare(a, b), strength = value === null ? 0 : Math.min(1, Math.abs(value) / limit);
+      const background = value === null ? "#f0f2f0" : mode !== "mae" && value < 0 ? `rgba(39,123,146,${.08 + strength * .82})` : `rgba(190,88,67,${.08 + strength * .82})`;
+      return <i key={`${a}-${b}`} style={{ background }} title={`${a} × ${b}: ${value === null ? "—" : value.toFixed(4)}`}>{value === null ? "—" : `${mode === "difference" && value > 0 ? "+" : ""}${value.toFixed(2)}`}</i>;
+    })}</Fragment>)}</div><p className="chart-note">当前：{COHORT_SUMMARY_METRICS[metric].label} · {mode === "mae" ? "MAE越小越相似" : mode === "correlation" ? "相关越高，20情绪轮廓越相似" : "正值表示行组更高，负值表示列组更高"}。</p>
+  </div>;
+}
+
+function BidirectionalPairDifference({ rows, qMetric, sourceA, sourceB, sources, onSourceA, onSourceB }: { rows: ExportRow[]; qMetric: QMetric; sourceA: string; sourceB: string; sources: string[]; onSourceA: (value: string) => void; onSourceB: (value: string) => void }) {
+  const [metric, setMetric] = useState<"p" | "q" | "gap" | "harmony">("gap");
+  const labels = { p: "词选色 P", q: `色选词 Q（${Q_METRICS[qMetric].label}）`, gap: "方向差 P−Q", harmony: "双向调和强度" };
+  const rowValue = (row: ExportRow) => { const p = numberOf(row, "词选色概率_P"), q = numberOf(row, Q_METRICS[qMetric].field); return metric === "p" ? p : metric === "q" ? q : metric === "gap" ? p - q : p + q ? 2 * p * q / (p + q) : 0; };
+  const difference = (emotion: string, code: string) => {
+    const a = rows.find(row => row["来源"] === sourceA && row["情绪"] === emotion && row["标准色码"] === code), b = rows.find(row => row["来源"] === sourceB && row["情绪"] === emotion && row["标准色码"] === code);
+    return a && b ? rowValue(a) - rowValue(b) : null;
   };
-  const differences = GEW_EMOTIONS.flatMap(emotion => GEW_COLOURS.map(code => cellDifference(emotion, code))).filter((value): value is number => value !== null);
-  const limit = Math.max(.025, ...differences.map(Math.abs));
-  return <div className="cohort-bidirectional-heatmap">
-    <div className="cohort-view-head"><div><span>AI − HUMAN</span><h4>双向关联单元的组间差值</h4><p>对每个情绪×标准色先计算各来源指标，再比较 AI 来源均值与人类来源均值。</p></div><label>比较量<select value={metric} onChange={event => setMetric(event.target.value as CohortCellMetric)}>{Object.entries(metricLabels).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label></div>
-    <div className="heatmap-wrap"><div className="bidirectional-heatmap" style={{ gridTemplateColumns: `125px repeat(${GEW_COLOURS.length},minmax(58px,1fr))` }}>
-      <span />{GEW_COLOURS.map(code => <b key={code}><i style={{ background: GEW_COLOR_HEX[code] }} />{code}</b>)}
-      {GEW_EMOTIONS.map(emotion => <div className="heatmap-row" key={emotion}><strong>{emotion}</strong>{GEW_COLOURS.map(code => {
-        const value = cellDifference(emotion, code), strength = value === null ? 0 : Math.min(1, Math.abs(value) / limit);
-        const background = value === null ? "#f2f3f1" : value >= 0 ? `rgba(190,88,67,${.08 + strength * .82})` : `rgba(39,123,146,${.08 + strength * .82})`;
-        return <i key={code} style={{ background }} title={`${emotion} · ${code}\nAI−人类: ${value === null ? "—" : value.toFixed(4)}`}><span>{value === null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`}</span></i>;
-      })}</div>)}
-    </div><div className="asymmetry-legend"><span>蓝：人类更高</span><i className="cohort-difference-scale" /><span>红：AI 更高</span></div></div>
-    <p className="chart-note">当前比较量：{metricLabels[metric]}。这里展示来源等权均值差，属于描述性组间结果；双向整合尚无参与者级共同观测，因此不把它包装成个体层面的显著性检验。</p>
+  const values = GEW_EMOTIONS.flatMap(emotion => GEW_COLOURS.map(code => difference(emotion, code))).filter((value): value is number => value !== null), limit = Math.max(.025, ...values.map(Math.abs));
+  return <div className="pair-difference-view"><div className="cohort-view-head"><div><span>PAIRWISE DRILL-DOWN</span><h4>任选两个试验组的20×11差值</h4><p>直接显示来源A−来源B，定位两组差异具体落在哪些情绪与标准色。</p></div><div className="paired-display-controls"><label>来源A<select value={sourceA} onChange={event => onSourceA(event.target.value)}>{sources.map(item => <option key={item}>{item}</option>)}</select></label><label>来源B<select value={sourceB} onChange={event => onSourceB(event.target.value)}>{sources.filter(item => item !== sourceA).map(item => <option key={item}>{item}</option>)}</select></label><label>比较量<select value={metric} onChange={event => setMetric(event.target.value as typeof metric)}>{Object.entries(labels).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label></div></div>
+    <div className="heatmap-wrap"><div className="bidirectional-heatmap" style={{ gridTemplateColumns: `125px repeat(${GEW_COLOURS.length},minmax(58px,1fr))` }}><span />{GEW_COLOURS.map(code => <b key={code}><i style={{ background: GEW_COLOR_HEX[code] }} />{code}</b>)}{GEW_EMOTIONS.map(emotion => <div className="heatmap-row" key={emotion}><strong>{emotion}</strong>{GEW_COLOURS.map(code => { const value = difference(emotion, code), strength = value === null ? 0 : Math.min(1, Math.abs(value) / limit), background = value === null ? "#f2f3f1" : value >= 0 ? `rgba(190,88,67,${.08 + strength * .82})` : `rgba(39,123,146,${.08 + strength * .82})`; return <i key={code} style={{ background }}><span>{value === null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`}</span></i>; })}</div>)}</div><div className="asymmetry-legend"><span>蓝：{sourceB}更高</span><i className="cohort-difference-scale" /><span>红：{sourceA}更高</span></div></div>
+    <p className="chart-note">当前比较量：{labels[metric]}。这是两个独立试验组的描述性差值；可结合实验二的来源两两检验判断具体单元的统计证据。</p>
   </div>;
 }
 
