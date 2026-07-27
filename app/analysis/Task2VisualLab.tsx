@@ -24,7 +24,7 @@ const METRICS: Record<GewMetric, { label: string; maximum: number }> = {
   overall: { label: "综合平均分", maximum: 5 },
 };
 const SERIES = ["#277b92", "#d47d55", "#4f8a70", "#8d6b94", "#b9973b", "#5675a7", "#b45d6b", "#657c82"];
-const RATING_COLORS = ["#e8ece9", "#d9e8ea", "#b8d7dc", "#7fb6c1", "#3e8798", "#1f596b"];
+const RATING_COLORS = ["#e5e7e5", "#3157c7", "#38b764", "#efd63f", "#e98632", "#d3312f"];
 const COMPOSITE_METRICS: Record<CompositeMetric, { label: string; mean: string; low: string; high: string; minimum: number; maximum: number }> = {
   broadness: { label: "情绪广度", mean: "平均情绪广度", low: "广度95CI下限", high: "广度95CI上限", minimum: 0, maximum: 20 },
   intensity: { label: "条件强度", mean: "平均条件强度", low: "条件强度95CI下限", high: "条件强度95CI上限", minimum: 1, maximum: 5 },
@@ -123,8 +123,8 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const sources = useMemo(() => [...new Set(cells.map(cell => cell.source))], [cells]);
   const colors = useMemo(() => [...new Set(cells.map(cell => cell.color))], [cells]);
   const [heatSource, setHeatSource] = useState(""), [profileSource, setProfileSource] = useState(""), [profileColor, setProfileColor] = useState("");
-  const [ratingSource, setRatingSource] = useState(""), [ratingColor, setRatingColor] = useState("");
   const [displayMetric, setDisplayMetric] = useState<GewMetric>("probability");
+  const [displayView, setDisplayView] = useState<"dots" | "wheel">("wheel");
   const [cohortMetric, setCohortMetric] = useState<GewMetric>("probability");
   const [groupColor, setGroupColor] = useState(""), [groupEmotion, setGroupEmotion] = useState("");
   const [compositeMetric, setCompositeMetric] = useState<CompositeMetric>("broadness");
@@ -134,8 +134,6 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const effectiveHeat = sources.includes(heatSource) ? heatSource : (sources[0] || "");
   const effectiveProfileSource = sources.includes(profileSource) ? profileSource : effectiveHeat;
   const effectiveColor = colors.includes(profileColor) ? profileColor : (colors[0] || "");
-  const effectiveRatingSource = sources.includes(ratingSource) ? ratingSource : effectiveHeat;
-  const effectiveRatingColor = colors.includes(ratingColor) ? ratingColor : (colors[0] || "");
   const effectiveA = sources.includes(differenceA) ? differenceA : (sources[0] || "");
   const effectiveB = sources.includes(differenceB) && differenceB !== effectiveA ? differenceB : (sources.find(source => source !== effectiveA) || "");
   const effectiveGroupColor = colors.includes(groupColor) ? groupColor : (colors[0] || "");
@@ -163,12 +161,12 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
         <CompositeIndicatorFacets rows={composite} metric={compositeMetric} sourceCohorts={sourceCohorts} />
       </article> : null}
       <article className="gew-view-block">
-        <ViewHead index="05" code="SOURCE FACETS" title="各来源颜色—情绪气泡点阵" note="组间总览后的来源明细；横轴为 20 个情绪，纵轴为 11 个标准色，所有来源采用同一尺度。"><MetricSelect value={displayMetric} onChange={setDisplayMetric} /></ViewHead>
-        <GewDotFacets metric={displayMetric} sources={sources} colors={colors} cells={cells} />
+        <ViewHead index="05" code="SOURCE FACETS" title={displayView === "wheel" ? "各来源 GEW 颜色面积扇区轮" : "各来源颜色—情绪气泡点阵"} note={displayView === "wheel" ? "圆周固定20个情绪，每个情绪扇区细分为11个标准色；小扇片面积与当前指标成正比。" : "横轴为20个情绪，纵轴为11个标准色，所有来源采用同一尺度。"}><div className="gew-inline-controls"><div className="view-mode-switch"><button className={displayView === "wheel" ? "active" : ""} onClick={() => setDisplayView("wheel")}>GEW 扇区轮</button><button className={displayView === "dots" ? "active" : ""} onClick={() => setDisplayView("dots")}>气泡点阵</button></div><MetricSelect value={displayMetric} onChange={setDisplayMetric} /></div></ViewHead>
+        {displayView === "wheel" ? <GewAreaWheelFacets metric={displayMetric} sources={sources} colors={colors} cells={cells} /> : <GewDotFacets metric={displayMetric} sources={sources} colors={colors} cells={cells} />}
       </article>
       {rawRows.length ? <article className="gew-view-block">
-        <ViewHead index="06" code="SOURCE DETAIL" title="单一来源的 0–5 评分分布" note="作为组间差异的下钻明细，完整保留 0=未关联与 1–5 强度等级。"><div className="gew-inline-controls"><Select label="来源" value={effectiveRatingSource} onChange={setRatingSource} options={sources} /><Select label="颜色" value={effectiveRatingColor} onChange={setRatingColor} options={colors} /></div></ViewHead>
-        <RatingDistribution rows={visibleRawRows} source={effectiveRatingSource} color={effectiveRatingColor} />
+        <ViewHead index="06" code="SOURCE × COLOR FACETS" title="八来源 × 标准色的 0–5 评分分布" note="参照GEW研究中的分面堆叠柱图：来源为行、颜色为列，每个面板的20根柱对应20个情绪；灰色0分位于顶部，彩色1–5分从底部堆叠。" ><span className="analysis-count">{sources.length} × {colors.length} 个分面</span></ViewHead>
+        <RatingFacetGrid rows={visibleRawRows} sources={sources} colors={colors} sourceCohorts={sourceCohorts} />
       </article> : null}
       <article className="gew-view-block">
         <ViewHead index="07" code="SOURCE DETAIL" title="单一来源的关联概率与条件强度" note="先区分“是否建立关联”，再观察建立关联后的强弱；用于解释上方组间差异来自哪个方向。"><label>来源<select value={effectiveHeat} onChange={event => setHeatSource(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label></ViewHead>
@@ -237,6 +235,54 @@ function EightGroupPairMatrix({ cells, pairwise, sourceCohorts, color, emotion, 
   </div><div className="asymmetry-legend"><span>蓝：列组更高</span><i className="cohort-difference-scale" /><span>红：行组更高</span></div><p className="chart-note">当前单元：{color} × {emotion}。矩阵上下三角互为相反数；关联概率的显著标记来自全部组对的统一 BH-FDR，条件强度与综合强度在此仅展示描述性差值。</p></div>;
 }
 
+function polarPoint(center: number, radius: number, angle: number) {
+  const radians = (angle - 90) * Math.PI / 180;
+  return [center + radius * Math.cos(radians), center + radius * Math.sin(radians)] as const;
+}
+
+function annularSectorPath(center: number, inner: number, outer: number, start: number, end: number) {
+  const outerStart = polarPoint(center, outer, start), outerEnd = polarPoint(center, outer, end);
+  const innerEnd = polarPoint(center, inner, end), innerStart = polarPoint(center, inner, start);
+  const large = end - start > 180 ? 1 : 0;
+  return `M ${outerStart[0]} ${outerStart[1]} A ${outer} ${outer} 0 ${large} 1 ${outerEnd[0]} ${outerEnd[1]} L ${innerEnd[0]} ${innerEnd[1]} A ${inner} ${inner} 0 ${large} 0 ${innerStart[0]} ${innerStart[1]} Z`;
+}
+
+function GewAreaWheelFacets({ metric, sources, colors, cells }: { metric: GewMetric; sources: string[]; colors: string[]; cells: GewCell[] }) {
+  const orderedColors = [...GEW_COLOURS.filter(code => colors.includes(code)), ...colors.filter(color => !GEW_COLOURS.includes(color as typeof GEW_COLOURS[number]))];
+  return <div className="gew-area-wheel-display">
+    <div className="gew-area-wheel-legend"><span>扇片面积 = {METRICS[metric].label}</span>{orderedColors.map(color => <i key={color}><em style={{ background: GEW_COLOR_HEX[color as keyof typeof GEW_COLOR_HEX] || "#8a989b" }} />{color}</i>)}<small>积极情绪 1–10 · 消极情绪 11–20</small></div>
+    <div className="gew-area-wheel-facets">{sources.map(source => <GewAreaWheel key={source} source={source} metric={metric} colors={orderedColors} cells={cells} />)}</div>
+  </div>;
+}
+
+function GewAreaWheel({ source, metric, colors, cells }: { source: string; metric: GewMetric; colors: string[]; cells: GewCell[] }) {
+  const center = 300, inner = 53, outer = 214, labelRadius = 248, maximum = METRICS[metric].maximum;
+  const lookup = new Map(cells.filter(cell => cell.source === source).map(cell => [`${cell.color}\u0000${cell.emotion}`, cell]));
+  return <article className="gew-area-wheel-card"><header><h5>{source}</h5><span>20 情绪 × {colors.length} 标准色 · 面积编码</span></header><svg className="gew-area-wheel" viewBox="0 0 600 600" role="img" aria-label={`${source} 的日内瓦情绪轮颜色面积图`}>
+    {GEW_EMOTIONS.map((emotion, emotionIndex) => {
+      const sectorStart = emotionIndex * 18 + .6, sectorEnd = (emotionIndex + 1) * 18 - .6;
+      const sliceWidth = (sectorEnd - sectorStart) / Math.max(1, colors.length);
+      return <g key={emotion}>
+        <path className={emotionIndex < 10 ? "emotion-sector positive" : "emotion-sector negative"} d={annularSectorPath(center, inner, outer, sectorStart, sectorEnd)} />
+        {colors.map((color, colorIndex) => {
+          const start = sectorStart + colorIndex * sliceWidth + .08, end = sectorStart + (colorIndex + 1) * sliceWidth - .08;
+          const cell = lookup.get(`${color}\u0000${emotion}`), value = valueOf(cell, metric);
+          const level = value === null ? 0 : Math.min(1, Math.max(0, value / maximum));
+          const radius = Math.sqrt(inner ** 2 + level * (outer ** 2 - inner ** 2));
+          return level > 0 ? <path className="color-area-slice" key={color} d={annularSectorPath(center, inner, radius, start, end)} fill={GEW_COLOR_HEX[color as keyof typeof GEW_COLOR_HEX] || "#8a989b"}><title>{source} · {emotion} · {color} · {METRICS[metric].label}: {shown(value, metric)}</title></path> : null;
+        })}
+      </g>;
+    })}
+    {[.25, .5, .75, 1].map(level => { const radius = Math.sqrt(inner ** 2 + level * (outer ** 2 - inner ** 2)); return <circle className="area-grid" key={level} cx={center} cy={center} r={radius} />; })}
+    <circle className="area-center" cx={center} cy={center} r={inner} />
+    <text className="area-center-title" x={center} y={center - 5}>GEW</text><text className="area-center-subtitle" x={center} y={center + 12}>{METRICS[metric].label}</text>
+    {GEW_EMOTIONS.map((emotion, index) => {
+      const angle = index * 18 + 9, [x, y] = polarPoint(center, labelRadius, angle);
+      return <text className={index < 10 ? "emotion-label positive" : "emotion-label negative"} key={emotion} x={x} y={y} textAnchor={x < center - 8 ? "end" : x > center + 8 ? "start" : "middle"}>{emotion}</text>;
+    })}
+  </svg><p>面积按环形扇区的实际几何面积缩放，而非仅按半径缩放；因此同一指标可在不同情绪与颜色间直接比较。</p></article>;
+}
+
 function GewDotFacets({ metric, sources, colors, cells }: { metric: GewMetric; sources: string[]; colors: string[]; cells: GewCell[] }) {
   const lookup = new Map(cells.map(cell => [keyOf(cell.source, cell.color, cell.emotion), cell]));
   const maximum = METRICS[metric].maximum;
@@ -266,22 +312,26 @@ function GewDotFacets({ metric, sources, colors, cells }: { metric: GewMetric; s
   </div>;
 }
 
-function RatingDistribution({ rows, source, color }: { rows: GewRow[]; source: string; color: string }) {
-  const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => row.source === source && row.color === color && row.emotion === emotion));
-  return <div className="rating-distribution">
-    <div className="rating-legend">{RATING_COLORS.map((fill, level) => <span key={level}><i style={{ background: fill }} />{level === 0 ? "0 未关联" : `${level} 分`}</span>)}</div>
-    <div className="rating-bars">{emotions.map(emotion => {
-      const values = rows.filter(row => row.source === source && row.color === color && row.emotion === emotion).map(row => Math.max(0, Math.min(5, Math.round(row.intensity))));
-      const counts = Array.from({ length: 6 }, (_, level) => values.filter(value => value === level).length), total = Math.max(1, values.length);
-      const selectedRate = 1 - counts[0] / total;
-      return <article key={emotion}>
-        <b>{emotion}</b>
-        <div>{counts.map((count, level) => <i key={level} style={{ width: `${count / total * 100}%`, background: RATING_COLORS[level] }} title={`${emotion} · ${level}分 · ${count}/${values.length} (${(count / total * 100).toFixed(1)}%)`}>{count / total >= .08 ? <span>{(count / total * 100).toFixed(0)}%</span> : null}</i>)}</div>
-        <strong>{(selectedRate * 100).toFixed(1)}%<small>关联</small></strong>
-      </article>;
-    })}</div>
-    <p className="chart-note">每一行合计 100%；左侧灰色为未建立关联，后续色段为 1–5 级条件强度的原始比例。</p>
+function RatingFacetGrid({ rows, sources, colors, sourceCohorts }: { rows: GewRow[]; sources: string[]; colors: string[]; sourceCohorts: Map<string, GewRow["cohort"]> }) {
+  const orderedSources = [...sources].sort((a, b) => {
+    const rank = (source: string) => sourceCohorts.get(source) === "human" ? 0 : sourceCohorts.get(source) === "ai" ? 1 : 2;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
+  const orderedColors = [...GEW_COLOURS.filter(code => colors.includes(code)), ...colors.filter(color => !GEW_COLOURS.includes(color as typeof GEW_COLOURS[number]))];
+  return <div className="rating-facet-wrap"><div className="rating-facet-legend">{RATING_COLORS.map((fill, level) => <span key={level}><i style={{ background: fill }} />{level === 0 ? "0 未关联" : `${level} 分`}</span>)}<small>每根柱总高 = 100%</small></div>
+    <div className="rating-facet-grid" style={{ gridTemplateColumns: `115px repeat(${orderedColors.length},minmax(285px,1fr))`, minWidth: `${115 + orderedColors.length * 285}px` }}>
+      <span className="rating-facet-corner">来源 × 颜色</span>{orderedColors.map(color => <b className="rating-color-head" key={color}><i style={{ background: GEW_COLOR_HEX[color as keyof typeof GEW_COLOR_HEX] || "#8a989b" }} />{color}</b>)}
+      {orderedSources.map((source, sourceIndex) => <Fragment key={source}><strong className="rating-source-head">{source}<small className={`cohort-tag ${sourceCohorts.get(source) || "unspecified"}`}>{cohortName(sourceCohorts.get(source))}</small></strong>{orderedColors.map(color => <RatingFacet key={`${source}-${color}`} rows={rows} source={source} color={color} showLabels={sourceIndex === orderedSources.length - 1} />)}</Fragment>)}
+    </div><p className="chart-note">每个小面板对应一个来源×标准色，20根柱按GEW固定情绪顺序排列。0分在柱顶以灰色显示；1–5分从蓝、绿、黄、橙到红依次向下堆叠，彩色部分总高度就是该情绪的关联率。</p>
   </div>;
+}
+
+function RatingFacet({ rows, source, color, showLabels }: { rows: GewRow[]; source: string; color: string; showLabels: boolean }) {
+  return <div className={`rating-facet ${showLabels ? "show-labels" : ""}`}><div className="rating-facet-bars">{GEW_EMOTIONS.map(emotion => {
+    const values = rows.filter(row => row.source === source && row.color === color && row.emotion === emotion).map(row => Math.max(0, Math.min(5, Math.round(row.intensity))));
+    const counts = Array.from({ length: 6 }, (_, level) => values.filter(value => value === level).length), total = Math.max(1, values.length);
+    return <div className="rating-facet-column" key={emotion}><div className="rating-facet-stack">{counts.map((count, level) => <i key={level} style={{ height: `${count / total * 100}%`, background: RATING_COLORS[level] }} title={`${source} · ${color} · ${emotion}\n${level}分: ${count}/${values.length} (${(count / total * 100).toFixed(1)}%)`} />)}</div>{showLabels ? <span>{emotion}</span> : null}</div>;
+  })}</div></div>;
 }
 
 function optionalNumber(value: unknown) {

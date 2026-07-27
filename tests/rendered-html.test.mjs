@@ -79,7 +79,10 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(task2Visuals, /关联概率与条件强度/);
   assert.match(task2Visuals, /各来源颜色—情绪气泡点阵/);
   assert.match(task2Visuals, /所有来源采用同一尺度/);
-  assert.match(task2Visuals, /单一来源的 0–5 评分分布/);
+  assert.match(task2Visuals, /八来源 × 标准色的 0–5 评分分布/);
+  assert.match(task2Visuals, /来源为行、颜色为列/);
+  assert.match(task2Visuals, /各来源 GEW 颜色面积扇区轮/);
+  assert.match(task2Visuals, /小扇片面积与当前指标成正比/);
   assert.match(task2Visuals, /广度、条件强度与效价偏向/);
   assert.match(task2Visuals, /完整 11×20 矩阵模式相似性/);
   assert.match(task2Visuals, /指定颜色×情绪的八组并列比较/);
