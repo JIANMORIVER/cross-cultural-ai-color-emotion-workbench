@@ -1008,37 +1008,42 @@ export function runHumanAiGewAlignment(rows: GewRow[]): AnalysisResult {
 export function runHumanAiGewCohortTest(rows: GewRow[]): AnalysisResult {
   rows = rows.filter(row => row.valid && row.cohort !== "unspecified");
   const counts = summarizeGew(rows), colors = [...new Set(rows.map(row => row.color))], outputRaw: Array<{
-    color: string; emotion: string; human: Array<{ source: string; rate: number; intensity: number; n: number }>; ai: Array<{ source: string; rate: number; intensity: number; n: number }>;
-    rateDifference: number; intensityDifference: number; rateP: number; intensityP: number;
+    color: string; emotion: string; human: Array<{ source: string; rate: number; intensity: number; conditional: number; n: number }>; ai: Array<{ source: string; rate: number; intensity: number; conditional: number; n: number }>;
+    rateDifference: number; intensityDifference: number; conditionalDifference: number; rateP: number; intensityP: number; conditionalP: number;
   }> = [];
   colors.forEach(color => GEW_EMOTIONS.forEach(emotion => {
     const sourceRows = [...new Set(rows.filter(row => row.color === color && row.emotion === emotion).map(row => `${row.cohort}\u0000${row.source}`))].map(key => {
       const [cohort, source] = key.split("\u0000"), group = counts.get(`${source}\u0000${color}\u0000${emotion}`);
-      return group && group.n ? { cohort, source, n: group.n, rate: group.yes / group.n, intensity: group.intensity / group.n } : null;
-    }).filter((item): item is { cohort: string; source: string; n: number; rate: number; intensity: number } => Boolean(item));
+      return group && group.n ? { cohort, source, n: group.n, rate: group.yes / group.n, intensity: group.intensity / group.n, conditional: group.yes ? group.selectedIntensity / group.yes : NaN } : null;
+    }).filter((item): item is { cohort: string; source: string; n: number; rate: number; intensity: number; conditional: number } => Boolean(item));
     const human = sourceRows.filter(item => item.cohort === "human"), ai = sourceRows.filter(item => item.cohort === "ai");
     if (!human.length || !ai.length) return;
     const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
     const rates = [...human.map(item => item.rate), ...ai.map(item => item.rate)], intensities = [...human.map(item => item.intensity), ...ai.map(item => item.intensity)];
+    const humanConditional = human.map(item => item.conditional).filter(Number.isFinite), aiConditional = ai.map(item => item.conditional).filter(Number.isFinite);
+    const conditionals = [...humanConditional, ...aiConditional];
     outputRaw.push({
       color, emotion, human, ai,
       rateDifference: mean(ai.map(item => item.rate)) - mean(human.map(item => item.rate)),
       intensityDifference: mean(ai.map(item => item.intensity)) - mean(human.map(item => item.intensity)),
+      conditionalDifference: humanConditional.length && aiConditional.length ? mean(aiConditional) - mean(humanConditional) : NaN,
       rateP: exactScalarPermutationP(rates, human.length),
       intensityP: exactScalarPermutationP(intensities, human.length),
+      conditionalP: humanConditional.length && aiConditional.length ? exactScalarPermutationP(conditionals, humanConditional.length) : NaN,
     });
   }));
-  const rateAdjusted = bh(outputRaw.map(item => item.rateP).filter(Number.isFinite)), intensityAdjusted = bh(outputRaw.map(item => item.intensityP).filter(Number.isFinite));
-  let rateIndex = 0, intensityIndex = 0;
+  const rateAdjusted = bh(outputRaw.map(item => item.rateP).filter(Number.isFinite)), intensityAdjusted = bh(outputRaw.map(item => item.intensityP).filter(Number.isFinite)), conditionalAdjusted = bh(outputRaw.map(item => item.conditionalP).filter(Number.isFinite));
+  let rateIndex = 0, intensityIndex = 0, conditionalIndex = 0;
   const output: ExportRow[] = outputRaw.map(item => {
-    const rateQ = Number.isFinite(item.rateP) ? rateAdjusted[rateIndex++] : NaN, intensityQ = Number.isFinite(item.intensityP) ? intensityAdjusted[intensityIndex++] : NaN;
+    const rateQ = Number.isFinite(item.rateP) ? rateAdjusted[rateIndex++] : NaN, intensityQ = Number.isFinite(item.intensityP) ? intensityAdjusted[intensityIndex++] : NaN, conditionalQ = Number.isFinite(item.conditionalP) ? conditionalAdjusted[conditionalIndex++] : NaN;
     return {
       颜色: item.color, 情绪: item.emotion, 人类来源数: item.human.length, AI来源数: item.ai.length,
       AI减人类_来源平均选择率差: round(item.rateDifference, 6), 选择率精确置换p值: Number.isFinite(item.rateP) ? round(item.rateP, 6) : null, 选择率FDR_q值: Number.isFinite(rateQ) ? round(rateQ, 6) : null,
+      AI减人类_来源平均条件强度差: Number.isFinite(item.conditionalDifference) ? round(item.conditionalDifference, 6) : null, 条件强度精确置换p值: Number.isFinite(item.conditionalP) ? round(item.conditionalP, 6) : null, 条件强度FDR_q值: Number.isFinite(conditionalQ) ? round(conditionalQ, 6) : null,
       AI减人类_来源平均强度差: round(item.intensityDifference, 6), 强度精确置换p值: Number.isFinite(item.intensityP) ? round(item.intensityP, 6) : null, 强度FDR_q值: Number.isFinite(intensityQ) ? round(intensityQ, 6) : null,
     };
   });
-  return { id: "task2-cohort-test", title: "人类–AI情绪轮来源级精确比较", kind: "statistics", rows: output, summary: [{ label: "颜色×情绪", value: String(output.length) }, { label: "分析单位", value: "来源" }, { label: "多重校正", value: "BH-FDR" }], note: "先在每个来源内计算颜色×情绪的选择率与平均强度，再以来源为独立单位进行人类/AI双侧精确置换检验。4+4来源时每项穷举70种标签分配；选择率和强度分别进行BH-FDR校正。" };
+  return { id: "task2-cohort-test", title: "人类–AI情绪轮来源级精确比较", kind: "statistics", rows: output, summary: [{ label: "颜色×情绪", value: String(output.length) }, { label: "分析单位", value: "来源" }, { label: "多重校正", value: "BH-FDR" }], note: "先在每个来源内计算颜色×情绪的选择率、条件强度与零值纳入强度，再以来源为独立单位进行人类/AI双侧精确置换检验。4+4来源且数据完整时每项穷举70种标签分配；三类指标分别进行BH-FDR校正。" };
 }
 
 function ranksWithTies(values: number[]) {
@@ -1181,6 +1186,58 @@ export function runBidirectionalConsistency(colors: CanonicalColorRow[], gewRows
     ],
     note: "将自由词选色以 CIEDE2000 硬映射到实验二的 11 个标准色，再按同名来源构造 20×11 双向矩阵。实验二方向分别保留关联概率、已选择条件强度和零值纳入综合强度三种口径，并输出对应Spearman与JSD相似度；Top-1/Top-3、P−Q与调和互惠强度默认基于综合强度。该结果是主流GEW分析之后的来源级探索扩展，不应在缺少共同participant/run标识时解释为个体回认。",
   };
+}
+
+export function runBidirectionalCohortTest(rows: ExportRow[]): AnalysisResult {
+  const unique = new Map<string, ExportRow>();
+  rows.forEach(row => {
+    const source = String(row["来源"] || ""), emotion = String(row["情绪"] || "");
+    if (source && emotion) unique.set(`${source}\u0000${emotion}`, row);
+  });
+  const metrics: Array<{ key: string; label: string; read: (row: ExportRow) => number | null }> = [
+    { key: "rank_probability", label: "排序一致性_关联概率", read: row => finiteExportNumber(row["情绪颜色排序Spearman_概率"]) },
+    { key: "rank_conditional", label: "排序一致性_条件强度", read: row => finiteExportNumber(row["情绪颜色排序Spearman_条件强度"]) },
+    { key: "rank_overall", label: "排序一致性_综合强度", read: row => finiteExportNumber(row["情绪颜色排序Spearman_综合"]) },
+    { key: "jsd_probability", label: "分布相似度_关联概率", read: row => finiteExportNumber(row["JSD相似度_关联概率"]) },
+    { key: "jsd_conditional", label: "分布相似度_条件强度", read: row => finiteExportNumber(row["JSD相似度_条件强度"]) },
+    { key: "jsd_overall", label: "分布相似度_综合强度", read: row => finiteExportNumber(row["JSD相似度_综合"]) },
+    { key: "top1", label: "Top1相互首选率", read: row => row["Top1相互首选"] === null || row["Top1相互首选"] === undefined ? null : row["Top1相互首选"] ? 1 : 0 },
+    { key: "asymmetry", label: "平均绝对非对称", read: row => finiteExportNumber(row["平均绝对非对称"]) },
+  ];
+  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const raw = metrics.flatMap(metric => GEW_EMOTIONS.flatMap(emotion => {
+    const emotionRows = [...unique.values()].filter(row => row["情绪"] === emotion);
+    const human = emotionRows.filter(row => row["组类型"] === "human").map(metric.read).filter((value): value is number => value !== null);
+    const ai = emotionRows.filter(row => row["组类型"] === "ai").map(metric.read).filter((value): value is number => value !== null);
+    if (!human.length || !ai.length) return [];
+    return [{ metric, emotion, human, ai, difference: mean(ai) - mean(human), p: exactScalarPermutationP([...human, ...ai], human.length) }];
+  }));
+  const adjustedByMetric = new Map<string, number[]>();
+  metrics.forEach(metric => adjustedByMetric.set(metric.key, bh(raw.filter(item => item.metric.key === metric.key).map(item => item.p).filter(Number.isFinite))));
+  const metricIndices = new Map(metrics.map(metric => [metric.key, 0]));
+  const output: ExportRow[] = raw.map(item => {
+    const index = metricIndices.get(item.metric.key) || 0, adjusted = adjustedByMetric.get(item.metric.key) || [];
+    metricIndices.set(item.metric.key, index + 1);
+    return {
+      指标: item.metric.label, 情绪: item.emotion,
+      人类来源数: item.human.length, AI来源数: item.ai.length,
+      人类来源均值: round(mean(item.human), 6), AI来源均值: round(mean(item.ai), 6),
+      AI减人类差: round(item.difference, 6),
+      来源级精确置换p值: Number.isFinite(item.p) ? round(item.p, 6) : null,
+      指标内20情绪FDR_q值: Number.isFinite(adjusted[index]) ? round(adjusted[index], 6) : null,
+    };
+  });
+  return {
+    id: "task-cross-cohort", title: "双向整合人类–AI来源级比较", kind: "statistics", rows: output,
+    summary: [{ label: "指标", value: String(metrics.length) }, { label: "情绪×指标", value: String(output.length) }, { label: "分析单位", value: "来源" }],
+    note: "对每个来源先保留一个来源×情绪双向指标，再比较人类来源与AI来源。每项使用双侧精确标签置换；排序一致性、分布相似度、Top-1和非对称性分别在20个情绪内做BH-FDR。该检验以来源为独立单位，不解释为参与者级回认差异。",
+  };
+}
+
+function finiteExportNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 export function toCsv(rows: ExportRow[]) {

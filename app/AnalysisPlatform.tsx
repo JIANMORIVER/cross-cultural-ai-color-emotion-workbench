@@ -12,6 +12,7 @@ import {
   parseColorRows,
   parseGewRows,
   runBidirectionalConsistency,
+  runBidirectionalCohortTest,
   runColorClustering,
   runColorDiversity,
   runCulturalBias,
@@ -107,8 +108,9 @@ const TASKS = [
   { id: "task2-indicators", group: "实验二 · 扩展", title: "广度、条件强度与效价偏向", description: "以 participant×run×color 为单位分别计算情绪广度、已选择条件强度与正负效价偏向，并报告 Bootstrap 95% 区间。", output: "综合指标与区间", space: "Broadness + conditional intensity + valence bias" },
   { id: "task2-pattern", group: "实验二 · 扩展", title: "完整矩阵模式相似性", description: "将每个来源的 11×20 关联概率矩阵展平为 220 维向量，比较整张颜色—情绪结构并估计 Bootstrap 95% 区间。", output: "来源对模式相关", space: "220维 Pearson r + 500次 Bootstrap" },
   { id: "task2-human-ai", group: "实验二 · 扩展", title: "人类–AI 情绪轮对齐", description: "逐颜色寻找 AI 最接近的人类组，同时报告分布距离与轮廓相关。", output: "人类–AI 对齐表", space: "JSD + Pearson 相关" },
-  { id: "task2-cohort-test", group: "实验二 · 推断", title: "人类–AI 来源级精确检验", description: "在每个来源内汇总颜色×情绪的选择率与零值纳入强度，再做 4×4 来源级精确置换与 FDR 校正。", output: "选择率 / 强度效应与 p/q", space: "来源级 70种精确标签置换 + BH-FDR" },
+  { id: "task2-cohort-test", group: "实验二 · 推断", title: "人类–AI 来源级精确检验", description: "在每个来源内汇总颜色×情绪的选择率、条件强度与零值纳入强度，再做 4×4 来源级精确置换与 FDR 校正。", output: "三类效应与 p/q", space: "来源级 70种精确标签置换 + BH-FDR" },
   { id: "task-cross-bidirectional", group: "双向整合 · 探索", title: "双向一致性与非对称性", description: "将自由词选色按 CIEDE2000 映射到 11 个标准色，与色选词矩阵比较 Top-1/Top-3、Spearman、JSD、方向差与互惠强度。", output: "20×11 双向关联长表", space: "ΔE00 硬映射 + Spearman + JSD + P−Q" },
+  { id: "task-cross-cohort", group: "双向整合 · 推断", title: "人类–AI 双向来源级比较", description: "以来源为独立单位比较人类与 AI 的排序一致性、分布相似度、Top-1 和非对称性，执行精确置换与指标内 FDR。", output: "情绪×双向指标的组间效应与 p/q", space: "4×4 来源级精确置换 + BH-FDR" },
 ] as const;
 
 function download(name: string, content: string, type = "text/csv;charset=utf-8") {
@@ -585,6 +587,7 @@ export function AnalysisPlatform() {
       else if (id === "task2-pattern") result = runGewPatternSimilarity(gewData.rows);
       else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
       else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
+      else if (id === "task-cross-cohort") result = runBidirectionalCohortTest(bidirectionalData.rows);
       else result = bidirectionalData;
       if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
       setRuns(current => ({ ...current, [id]: { status: "completed", result } }));
@@ -603,6 +606,7 @@ export function AnalysisPlatform() {
     if (["task2-omnibus", "task2-pairwise", "task2-jsd", "task2-pattern"].includes(id)) return task2 && gewSources >= 2;
     if (id === "task2-human-ai") return task2 && gewData.rows.some(row => row.cohort === "human") && gewData.rows.some(row => row.cohort === "ai");
     if (id === "task2-cohort-test") return task2 && new Set(gewData.rows.filter(row => row.cohort === "human").map(row => row.source)).size >= 2 && new Set(gewData.rows.filter(row => row.cohort === "ai").map(row => row.source)).size >= 2;
+    if (id === "task-cross-cohort") return new Set(bidirectionalData.rows.filter(row => row["组类型"] === "human").map(row => row["来源"])).size >= 2 && new Set(bidirectionalData.rows.filter(row => row["组类型"] === "ai").map(row => row["来源"])).size >= 2;
     if (id === "task-cross-bidirectional") return bidirectionalData.rows.length > 0;
     return id.startsWith("task1") ? task1 : task2;
   }
@@ -884,7 +888,7 @@ export function AnalysisPlatform() {
       {dashboardMode === "task1"
         ? <Task1Dashboard rows={dashboardColors} fileName={fileName} />
         : dashboardMode === "task2"
-          ? <Task2Dashboard rows={dashboardGew} rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} />
+          ? <Task2Dashboard rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} />
           : <BidirectionalVisualLab rows={dashboardBidirectional} />}
     </section> : null}
   </>;
@@ -903,11 +907,14 @@ function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColor
   </>;
 }
 
-function Task2Dashboard({ rows, rawRows, visibleEmotion, fileName }: { rows: ExportRow[]; rawRows: GewRow[]; visibleEmotion?: string; fileName: string }) {
-  const numeric = rows.map(row => Number(row["选择率"]) || 0);
-  const selectedTotal = rows.reduce((sum, row) => sum + Number(row["选择次数"] || 0), 0); const sampleTotal = rows.reduce((sum, row) => sum + Number(row["N"] || 0), 0);
+function Task2Dashboard({ rawRows, visibleEmotion, fileName }: { rawRows: GewRow[]; visibleEmotion?: string; fileName: string }) {
+  const humanSources = new Set(rawRows.filter(row => row.cohort === "human").map(row => row.source));
+  const aiSources = new Set(rawRows.filter(row => row.cohort === "ai").map(row => row.source));
+  const cohortRows = humanSources.size && aiSources.size ? runHumanAiGewCohortTest(rawRows).rows : [];
+  const rateSignificant = cohortRows.filter(row => row["选择率FDR_q值"] !== null && Number(row["选择率FDR_q值"]) < .05).length;
+  const conditionalSignificant = cohortRows.filter(row => row["条件强度FDR_q值"] !== null && Number(row["条件强度FDR_q值"]) < .05).length;
   return <>
-    <div className="dashboard-kpis"><article><span>统计单元</span><strong>{rows.length.toLocaleString()}</strong><small>来源 × 颜色 × 情绪</small></article><article><span>总体选择率</span><strong>{sampleTotal ? (selectedTotal / sampleTotal * 100).toFixed(1) : "0.0"}%</strong><small>当前筛选范围</small></article><article><span>平均选择率</span><strong>{numeric.length ? (numeric.reduce((sum, value) => sum + value, 0) / numeric.length * 100).toFixed(1) : "0.0"}%</strong><small>各统计单元等权</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row["来源"])).size}</strong><small>当前可见</small></article></div>
+    <div className="dashboard-kpis"><article><span>人类来源</span><strong>{humanSources.size}</strong><small>来源作为独立比较单位</small></article><article><span>AI 来源</span><strong>{aiSources.size}</strong><small>与人类来源等权</small></article><article><span>选择率组间差异</span><strong>{cohortRows.length ? rateSignificant : "—"}</strong><small>FDR q&lt;.05 的颜色×情绪单元</small></article><article><span>条件强度组间差异</span><strong>{cohortRows.length ? conditionalSignificant : "—"}</strong><small>FDR q&lt;.05 的颜色×情绪单元</small></article></div>
     <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} />
   </>;
 }

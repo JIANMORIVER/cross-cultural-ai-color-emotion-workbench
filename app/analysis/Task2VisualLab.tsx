@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useRef, useState } from "react";
-import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, runGewCompositeIndicators, runGewPatternSimilarity, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
+import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, runGewCompositeIndicators, runGewPatternSimilarity, runHumanAiGewCohortTest, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
 
 type GewMetric = "probability" | "conditional" | "overall";
 type CompositeMetric = "broadness" | "intensity" | "valence";
@@ -34,6 +34,9 @@ const COMPOSITE_METRICS: Record<CompositeMetric, { label: string; mean: string; 
 function numberOf(value: unknown) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? number : 0;
+}
+function average(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
 function normalizeGew(data: GewRow[] | AnalysisResult): GewCell[] {
@@ -119,11 +122,18 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const visibleRawRows = useMemo(() => visibleEmotion ? rawRows.filter(row => row.emotion === visibleEmotion) : rawRows, [rawRows, visibleEmotion]);
   const composite = useMemo(() => rawRows.length ? runGewCompositeIndicators(rawRows, 200).rows : [], [rawRows]);
   const pattern = useMemo(() => new Set(rawRows.map(row => row.color)).size >= GEW_COLOURS.length ? runGewPatternSimilarity(rawRows, 0).rows : [], [rawRows]);
+  const sourceCohorts = useMemo(() => new Map(rawRows.map(row => [row.source, row.cohort])), [rawRows]);
+  const humanSources = useMemo(() => [...sourceCohorts].filter(([, cohort]) => cohort === "human").map(([source]) => source), [sourceCohorts]);
+  const aiSources = useMemo(() => [...sourceCohorts].filter(([, cohort]) => cohort === "ai").map(([source]) => source), [sourceCohorts]);
+  const cohortComparison = useMemo(() => humanSources.length && aiSources.length ? runHumanAiGewCohortTest(rawRows).rows : [], [rawRows, humanSources.length, aiSources.length]);
+  const visibleCohortComparison = useMemo(() => visibleEmotion ? cohortComparison.filter(row => row["情绪"] === visibleEmotion) : cohortComparison, [cohortComparison, visibleEmotion]);
   const sources = useMemo(() => [...new Set(cells.map(cell => cell.source))], [cells]);
   const colors = useMemo(() => [...new Set(cells.map(cell => cell.color))], [cells]);
   const [heatSource, setHeatSource] = useState(""), [profileSource, setProfileSource] = useState(""), [profileColor, setProfileColor] = useState("");
   const [ratingSource, setRatingSource] = useState(""), [ratingColor, setRatingColor] = useState("");
   const [displayMetric, setDisplayMetric] = useState<GewMetric>("probability");
+  const [cohortMetric, setCohortMetric] = useState<GewMetric>("probability");
+  const [groupColor, setGroupColor] = useState(""), [groupEmotion, setGroupEmotion] = useState("");
   const [compositeMetric, setCompositeMetric] = useState<CompositeMetric>("broadness");
   const [profileMetric, setProfileMetric] = useState<GewMetric>("overall"), [differenceA, setDifferenceA] = useState(""), [differenceB, setDifferenceB] = useState("");
   const [differenceMetric, setDifferenceMetric] = useState<GewMetric>("overall");
@@ -135,37 +145,50 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const effectiveRatingColor = colors.includes(ratingColor) ? ratingColor : (colors[0] || "");
   const effectiveA = sources.includes(differenceA) ? differenceA : (sources[0] || "");
   const effectiveB = sources.includes(differenceB) && differenceB !== effectiveA ? differenceB : (sources.find(source => source !== effectiveA) || "");
+  const effectiveGroupColor = colors.includes(groupColor) ? groupColor : (colors[0] || "");
+  const visibleEmotions = GEW_EMOTIONS.filter(emotion => cells.some(cell => cell.emotion === emotion));
+  const effectiveGroupEmotion = visibleEmotions.includes(groupEmotion as typeof GEW_EMOTIONS[number]) ? groupEmotion : (visibleEmotions[0] || "");
   const safeName = fileName.replace(/\.[^.]+$/, "").replace(/\s+/g, "-");
 
   return <section className="task2-visual-lab visual-lab panel" ref={labRef}>
     <div className="visual-lab-head"><div><span className="eyebrow">GEW 关系结构精选视图</span><h3>颜色 × 情绪关联画像</h3><p>当前筛选 {cells.length.toLocaleString()} 个统计单元 · {sources.length} 个来源 · {colors.length} 种颜色</p></div><div className="visual-export"><button className="secondary" disabled={!cells.length} onClick={() => download(`${safeName}_gew-visual-data.csv`, toCsv(exportRows(cells)))}>导出描述数据 CSV</button><button className="primary" disabled={!cells.length} onClick={() => labRef.current && void downloadPng(labRef.current, `${safeName}_gew-visual-panel.png`)}>导出面板 PNG</button></div></div>
     {!cells.length ? <div className="task2-visual-empty"><span>◎</span><b>当前筛选没有可绘制的 GEW 数据</b><small>请保留来源、颜色、情绪、选择与强度字段。</small></div> : <>
+      {visibleCohortComparison.length ? <article className="gew-view-block emphasis">
+        <ViewHead index="01" code="AI − HUMAN" title="人类组与 AI 组来源均值差" note={`以来源为独立单位；比较 ${aiSources.length} 个 AI 来源均值与 ${humanSources.length} 个人类来源均值。圆点表示该单元在来源级精确置换检验后 FDR q<.05。`}><MetricSelect value={cohortMetric} onChange={setCohortMetric} /></ViewHead>
+        <CohortDifferenceHeatmap rows={visibleCohortComparison} metric={cohortMetric} colors={colors} />
+      </article> : <article className="gew-view-block emphasis">
+        <ViewHead index="01" code="GROUP REQUIREMENT" title="人类–AI 组间比较尚未启用" note="需要同时导入并正确标记 human 与 ai 来源；仅选择单个来源时也会暂时隐藏总体组间比较。"><span className="analysis-count">当前 {sources.length} 个来源</span></ViewHead>
+      </article>}
       <article className="gew-view-block">
-        <ViewHead index="01" code="DIRECT DISPLAY" title="颜色—情绪气泡点阵分面" note="每个来源一张同尺度点阵；横轴为 20 个情绪，纵轴为 11 个标准色，圆点大小直接对应当前指标。"><MetricSelect value={displayMetric} onChange={setDisplayMetric} /></ViewHead>
+        <ViewHead index="02" code="SOURCE-LEVEL CONTRAST" title="指定单元的八来源并列比较" note="每个点代表一个来源，按人类组与 AI 组分栏；粗线为该类别的来源等权均值，避免按原始行数加权。"><div className="gew-inline-controls"><Select label="颜色" value={effectiveGroupColor} onChange={setGroupColor} options={colors} /><Select label="情绪" value={effectiveGroupEmotion} onChange={setGroupEmotion} options={visibleEmotions} /><MetricSelect value={cohortMetric} onChange={setCohortMetric} /></div></ViewHead>
+        <SourceGroupComparison cells={cells} sourceCohorts={sourceCohorts} color={effectiveGroupColor} emotion={effectiveGroupEmotion} metric={cohortMetric} />
+      </article>
+      {pattern.length ? <article className="gew-view-block">
+        <ViewHead index="03" code="SOURCE × SOURCE" title="完整 11×20 矩阵模式相似性" note="八个来源直接两两比较；将完整关联概率矩阵展平为 220 维，便于观察人类内部、AI 内部与跨类别相似性。"><span className="analysis-count">Pearson r</span></ViewHead>
+        <PatternSimilarityMatrix rows={pattern} sourceCohorts={sourceCohorts} />
+      </article> : null}
+      {composite.length ? <article className="gew-view-block">
+        <ViewHead index="04" code="COMPOSITE BETWEEN-GROUP" title="广度、条件强度与效价偏向" note="所有来源使用同一坐标尺度，按来源比较点估计与 participant×run Bootstrap 95% 区间；人类来源在前，AI 来源在后。"><label>指标<select value={compositeMetric} onChange={event => setCompositeMetric(event.target.value as CompositeMetric)}>{Object.entries(COMPOSITE_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label></ViewHead>
+        <CompositeIndicatorFacets rows={composite} metric={compositeMetric} sourceCohorts={sourceCohorts} />
+      </article> : null}
+      <article className="gew-view-block">
+        <ViewHead index="05" code="SOURCE FACETS" title="各来源颜色—情绪气泡点阵" note="组间总览后的来源明细；横轴为 20 个情绪，纵轴为 11 个标准色，所有来源采用同一尺度。"><MetricSelect value={displayMetric} onChange={setDisplayMetric} /></ViewHead>
         <GewDotFacets metric={displayMetric} sources={sources} colors={colors} cells={cells} />
       </article>
       {rawRows.length ? <article className="gew-view-block">
-        <ViewHead index="02" code="FULL 0–5 DISTRIBUTION" title="评分等级的 100% 堆叠分布" note="完整保留 0=未关联与 1–5 强度等级，避免不同分布被相同均值掩盖。"><div className="gew-inline-controls"><Select label="来源" value={effectiveRatingSource} onChange={setRatingSource} options={sources} /><Select label="颜色" value={effectiveRatingColor} onChange={setRatingColor} options={colors} /></div></ViewHead>
+        <ViewHead index="06" code="SOURCE DETAIL" title="单一来源的 0–5 评分分布" note="作为组间差异的下钻明细，完整保留 0=未关联与 1–5 强度等级。"><div className="gew-inline-controls"><Select label="来源" value={effectiveRatingSource} onChange={setRatingSource} options={sources} /><Select label="颜色" value={effectiveRatingColor} onChange={setRatingColor} options={colors} /></div></ViewHead>
         <RatingDistribution rows={visibleRawRows} source={effectiveRatingSource} color={effectiveRatingColor} />
       </article> : null}
-      {composite.length ? <article className="gew-view-block">
-        <ViewHead index="03" code="COMPOSITE INDICATORS" title="广度、条件强度与效价偏向" note="每个来源按颜色展示点估计与 participant×run Bootstrap 95% 区间；三个指标保持分开解释。"><label>指标<select value={compositeMetric} onChange={event => setCompositeMetric(event.target.value as CompositeMetric)}>{Object.entries(COMPOSITE_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label></ViewHead>
-        <CompositeIndicatorFacets rows={composite} metric={compositeMetric} />
-      </article> : null}
-      {pattern.length ? <article className="gew-view-block">
-        <ViewHead index="04" code="PATTERN SIMILARITY" title="完整 11×20 矩阵模式相似性" note="将每个来源的关联概率矩阵展平为 220 维向量；相关越高，整体颜色—情绪结构越接近。"><span className="analysis-count">Pearson r</span></ViewHead>
-        <PatternSimilarityMatrix rows={pattern} />
-      </article> : null}
       <article className="gew-view-block">
-        <ViewHead index="05" code="HURDLE MODEL" title="关联概率与条件强度" note="先区分“是否建立关联”，再观察建立关联后的强弱；两张图采用相同颜色与 GEW 情绪顺序。"><label>来源<select value={effectiveHeat} onChange={event => setHeatSource(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label></ViewHead>
+        <ViewHead index="07" code="SOURCE DETAIL" title="单一来源的关联概率与条件强度" note="先区分“是否建立关联”，再观察建立关联后的强弱；用于解释上方组间差异来自哪个方向。"><label>来源<select value={effectiveHeat} onChange={event => setHeatSource(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label></ViewHead>
         <div className="gew-double-heatmaps"><GewHeatmap title="A · 关联概率" note="0–100% · 选择该情绪的样本比例" metric="probability" source={effectiveHeat} colors={colors} cells={cells} /><GewHeatmap title="B · 条件强度" note="1–5 · 仅在已选择样本中计算" metric="conditional" source={effectiveHeat} colors={colors} cells={cells} /></div>
       </article>
       <article className="gew-view-block">
-        <ViewHead index="06" code="EMOTION FINGERPRINT" title="单一颜色的 20 情绪径向画像" note="维持 GEW 顺序；外扩越明显，代表该颜色与对应情绪的关联越强。"><div className="gew-inline-controls"><Select label="来源" value={effectiveProfileSource} onChange={setProfileSource} options={sources} /><Select label="颜色" value={effectiveColor} onChange={setProfileColor} options={colors} /><MetricSelect value={profileMetric} onChange={setProfileMetric} /></div></ViewHead>
+        <ViewHead index="08" code="SOURCE DETAIL" title="单一来源、单一颜色的情绪画像" note="维持 GEW 顺序；作为组间差异的来源级解释图。"><div className="gew-inline-controls"><Select label="来源" value={effectiveProfileSource} onChange={setProfileSource} options={sources} /><Select label="颜色" value={effectiveColor} onChange={setProfileColor} options={colors} /><MetricSelect value={profileMetric} onChange={setProfileMetric} /></div></ViewHead>
         <GewRadial source={effectiveProfileSource} color={effectiveColor} metric={profileMetric} cells={cells} sourceIndex={Math.max(0, sources.indexOf(effectiveProfileSource))} />
       </article>
       <article className="gew-view-block">
-        <ViewHead index="07" code="SOURCE CONTRAST" title="来源差值热力图" note="直接显示 A−B；正值表示来源 A 更强，负值表示来源 B 更强。"><div className="gew-inline-controls"><Select label="来源 A" value={effectiveA} onChange={setDifferenceA} options={sources} /><Select label="来源 B" value={effectiveB} onChange={setDifferenceB} options={sources.filter(source => source !== effectiveA)} /><MetricSelect value={differenceMetric} onChange={setDifferenceMetric} /></div></ViewHead>
+        <ViewHead index="09" code="PAIRWISE DRILL-DOWN" title="两个指定来源的差值热力图" note="直接显示 A−B；用于从总体人类–AI差异继续下钻到任意两组。"><div className="gew-inline-controls"><Select label="来源 A" value={effectiveA} onChange={setDifferenceA} options={sources} /><Select label="来源 B" value={effectiveB} onChange={setDifferenceB} options={sources.filter(source => source !== effectiveA)} /><MetricSelect value={differenceMetric} onChange={setDifferenceMetric} /></div></ViewHead>
         {effectiveB ? <GewDifference sourceA={effectiveA} sourceB={effectiveB} metric={differenceMetric} colors={colors} cells={cells} /> : <div className="gew-comparison-empty">至少需要两个来源才能计算来源差值。</div>}
       </article>
     </>}
@@ -180,6 +203,59 @@ function Select({ label, value, onChange, options }: { label: string; value: str
 }
 function MetricSelect({ value, onChange }: { value: GewMetric; onChange: (value: GewMetric) => void }) {
   return <label>指标<select value={value} onChange={event => onChange(event.target.value as GewMetric)}>{Object.entries(METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label>;
+}
+
+const COHORT_FIELDS: Record<GewMetric, { difference: string; q: string }> = {
+  probability: { difference: "AI减人类_来源平均选择率差", q: "选择率FDR_q值" },
+  conditional: { difference: "AI减人类_来源平均条件强度差", q: "条件强度FDR_q值" },
+  overall: { difference: "AI减人类_来源平均强度差", q: "强度FDR_q值" },
+};
+
+function cohortName(cohort?: GewRow["cohort"]) {
+  return cohort === "human" ? "人类" : cohort === "ai" ? "AI" : "未标记";
+}
+
+function CohortDifferenceHeatmap({ rows, metric, colors }: { rows: ExportRow[]; metric: GewMetric; colors: string[] }) {
+  const fields = COHORT_FIELDS[metric];
+  const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => row["情绪"] === emotion));
+  const differences = rows.map(row => optionalNumber(row[fields.difference])).filter((value): value is number => value !== null);
+  const limit = Math.max(metric === "probability" ? .05 : .25, ...differences.map(Math.abs));
+  return <section className="gew-difference-card cohort-difference-card">
+    <div className="gew-difference-title"><b>AI 来源均值 − 人类来源均值</b><span>{METRICS[metric].label} · 红色偏 AI，蓝色偏人类 · ● 为 FDR q&lt;.05</span></div>
+    <div className="gew-matrix-scroll"><div className="gew-matrix gew-difference-matrix" style={{ gridTemplateColumns: `72px repeat(${emotions.length}, minmax(30px,1fr))` }}>
+      <span className="gew-corner">颜色</span>{emotions.map(emotion => <b className={GEW_EMOTIONS.indexOf(emotion) === 10 ? "gew-negative-start" : ""} key={emotion}><span>{emotion}</span></b>)}
+      {colors.map(color => <Fragment key={color}><strong>{color}</strong>{emotions.map(emotion => {
+        const row = rows.find(item => item["颜色"] === color && item["情绪"] === emotion);
+        const difference = optionalNumber(row?.[fields.difference]), q = optionalNumber(row?.[fields.q]);
+        const signed = difference === null ? 0 : Math.max(-1, Math.min(1, difference / limit));
+        return <i className={`${difference === null ? "missing" : signed >= 0 ? "positive" : "negative"} ${GEW_EMOTIONS.indexOf(emotion) === 10 ? "gew-negative-start" : ""}`} key={`${color}-${emotion}`} style={{ "--gew-difference": `${Math.abs(signed) * 82}%` } as React.CSSProperties} title={`${color} · ${emotion}\nAI−人类: ${difference === null ? "—" : difference.toFixed(3)}\nFDR q: ${q === null ? "—" : q.toFixed(4)}`}><span>{difference === null ? "—" : `${difference > 0 ? "+" : ""}${difference.toFixed(metric === "probability" ? 2 : 1)}`}{q !== null && q < .05 ? <b>●</b> : null}</span></i>;
+      })}</Fragment>)}
+    </div></div>
+    <div className="gew-diverging-scale"><span>人类更强</span><i /><em>0</em><i /><span>AI 更强</span></div>
+    <p className="chart-note">差值先在每个来源内汇总，再对来源等权平均；不会把样本行数较多的来源重复加权。显著标记来自来源级双侧精确置换检验，并对 220 个颜色×情绪单元分别做 BH-FDR 校正。</p>
+  </section>;
+}
+
+function SourceGroupComparison({ cells, sourceCohorts, color, emotion, metric }: { cells: GewCell[]; sourceCohorts: Map<string, GewRow["cohort"]>; color: string; emotion: string; metric: GewMetric }) {
+  const groups = (["human", "ai"] as const).map(cohort => {
+    const items = [...sourceCohorts].filter(([, value]) => value === cohort).map(([source]) => {
+      const cell = cells.find(item => item.source === source && item.color === color && item.emotion === emotion);
+      return { source, value: valueOf(cell, metric) };
+    }).filter((item): item is { source: string; value: number } => item.value !== null);
+    return { cohort, items, mean: items.length ? average(items.map(item => item.value)) : null };
+  });
+  const maximum = METRICS[metric].maximum;
+  return <div className="source-group-comparison">
+    <div className="source-group-scale"><span>0</span><i /><span>{metric === "probability" ? "100%" : maximum}</span></div>
+    {groups.map(group => <article className={group.cohort} key={group.cohort}>
+      <header><div><span>{cohortName(group.cohort)}</span><b>{group.items.length} 个来源</b></div><strong>{group.mean === null ? "—" : shown(group.mean, metric)}<small>来源均值</small></strong></header>
+      <div className="source-strip">
+        {group.mean !== null ? <i className="group-mean" style={{ left: `${group.mean / maximum * 100}%` }} /> : null}
+        {group.items.map((item, index) => <em key={item.source} style={{ left: `${item.value / maximum * 100}%`, top: `${12 + index * 26}px` }}><span>{item.source}</span><b>{shown(item.value, metric)}</b></em>)}
+      </div>
+    </article>)}
+    <p className="chart-note">{color} × {emotion} · {METRICS[metric].label}。点是来源，不是单条回答；两栏的粗线是类别内来源均值。</p>
+  </div>;
 }
 
 function GewDotFacets({ metric, sources, colors, cells }: { metric: GewMetric; sources: string[]; colors: string[]; cells: GewCell[] }) {
@@ -235,11 +311,14 @@ function optionalNumber(value: unknown) {
   return Number.isFinite(number) ? number : null;
 }
 
-function CompositeIndicatorFacets({ rows, metric }: { rows: ExportRow[]; metric: CompositeMetric }) {
-  const config = COMPOSITE_METRICS[metric], sources = [...new Set(rows.map(row => String(row["来源"] || "")))].filter(Boolean);
+function CompositeIndicatorFacets({ rows, metric, sourceCohorts }: { rows: ExportRow[]; metric: CompositeMetric; sourceCohorts: Map<string, GewRow["cohort"]> }) {
+  const config = COMPOSITE_METRICS[metric], sources = [...new Set(rows.map(row => String(row["来源"] || "")))].filter(Boolean).sort((a, b) => {
+    const rank = (source: string) => sourceCohorts.get(source) === "human" ? 0 : sourceCohorts.get(source) === "ai" ? 1 : 2;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
   const position = (value: number) => (value - config.minimum) / (config.maximum - config.minimum) * 100;
   return <div className="composite-facets">{sources.map(source => <article key={source}>
-    <header><h5>{source}</h5><span>{config.label} · {config.minimum} 至 {config.maximum}</span></header>
+    <header><h5>{source}</h5><span className={`cohort-tag ${sourceCohorts.get(source) || "unspecified"}`}>{cohortName(sourceCohorts.get(source))}</span></header>
     <div className="composite-axis"><span>{config.minimum}</span><i>{metric === "valence" ? <em style={{ left: "50%" }} /> : null}</i><span>{config.maximum}</span></div>
     <div className="composite-rows">{GEW_COLOURS.map(code => {
       const row = rows.find(item => item["来源"] === source && item["颜色"] === code);
@@ -249,16 +328,19 @@ function CompositeIndicatorFacets({ rows, metric }: { rows: ExportRow[]; metric:
   </article>)}</div>;
 }
 
-function PatternSimilarityMatrix({ rows }: { rows: ExportRow[] }) {
-  const sources = [...new Set(rows.flatMap(row => [String(row["来源A"] || ""), String(row["来源B"] || "")]))].filter(Boolean);
+function PatternSimilarityMatrix({ rows, sourceCohorts }: { rows: ExportRow[]; sourceCohorts: Map<string, GewRow["cohort"]> }) {
+  const sources = [...new Set(rows.flatMap(row => [String(row["来源A"] || ""), String(row["来源B"] || "")]))].filter(Boolean).sort((a, b) => {
+    const rank = (source: string) => sourceCohorts.get(source) === "human" ? 0 : sourceCohorts.get(source) === "ai" ? 1 : 2;
+    return rank(a) - rank(b) || a.localeCompare(b);
+  });
   const valueFor = (sourceA: string, sourceB: string) => {
     if (sourceA === sourceB) return 1;
     const row = rows.find(item => (item["来源A"] === sourceA && item["来源B"] === sourceB) || (item["来源A"] === sourceB && item["来源B"] === sourceA));
     return optionalNumber(row?.["颜色情绪矩阵Pearson_r"]);
   };
   return <div className="pattern-matrix-wrap"><div className="pattern-matrix" style={{ gridTemplateColumns: `130px repeat(${sources.length},minmax(72px,1fr))` }}>
-    <span />{sources.map(source => <b key={source}>{source}</b>)}
-    {sources.map(sourceA => <Fragment key={sourceA}><strong>{sourceA}</strong>{sources.map(sourceB => {
+    <span />{sources.map(source => <b className={`cohort-${sourceCohorts.get(source) || "unspecified"}`} key={source}>{source}<small>{cohortName(sourceCohorts.get(source))}</small></b>)}
+    {sources.map(sourceA => <Fragment key={sourceA}><strong className={`cohort-${sourceCohorts.get(sourceA) || "unspecified"}`}>{sourceA}<small>{cohortName(sourceCohorts.get(sourceA))}</small></strong>{sources.map(sourceB => {
       const value = valueFor(sourceA, sourceB), strength = value === null ? 0 : Math.abs(value);
       const background = value === null ? "#f0f2f0" : value >= 0 ? `rgba(39,123,146,${.08 + strength * .86})` : `rgba(202,105,70,${.08 + strength * .86})`;
       return <i key={sourceB} style={{ background, color: strength > .62 ? "white" : "#29414a" }} title={`${sourceA} × ${sourceB}: ${value === null ? "不可计算" : `r=${value.toFixed(3)}`}`}>{value === null ? "—" : value.toFixed(2)}</i>;
