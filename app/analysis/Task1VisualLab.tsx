@@ -3,6 +3,7 @@
 import { Fragment, useMemo, useRef, useState } from "react";
 import {
   colorRowsToExport,
+  GEW_EMOTIONS,
   runColorClustering,
   runCulturalBias,
   runDeltaE,
@@ -12,6 +13,9 @@ import {
   type CanonicalColorRow,
   type ExportRow,
 } from "./engine";
+import { downloadPublicationPng } from "./export-png";
+import { FigureExportControls, type FigureExportStyle } from "./FigureExportControls";
+import { downloadPngBlob, renderPythonHsvPng } from "./python-figures";
 
 type ChartKind = "hs-polar" | "vs-density" | "lab-ab-density" | "lab-distribution" | "mosaic" | "cluster-strip" | "within-delta" | "delta-heatmap" | "delta-box" | "delta-mean" | "radar" | "dumbbell" | "parity" | "bias-bars" | "gravity" | "slopegraph" | "bias-density" | "rank-heatmap" | "difficulty-heatmap";
 
@@ -44,16 +48,6 @@ const labelOf = (row: ExportRow, key: string) => String(row[key] ?? "");
 
 function download(name: string, content: string, type = "text/csv;charset=utf-8") {
   const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
-}
-
-async function downloadElementPng(element: HTMLElement, name: string) {
-  const width = Math.max(900, Math.ceil(element.scrollWidth)); const height = Math.max(520, Math.ceil(element.scrollHeight));
-  const css = [...document.styleSheets].map(sheet => { try { return [...sheet.cssRules].map(rule => rule.cssText).join("\n"); } catch { return ""; } }).join("\n");
-  const markup = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;min-height:${height}px;background:#f6f7f4;padding:20px;box-sizing:border-box"><style>${css}</style>${element.outerHTML}</div></foreignObject></svg>`;
-  const blob = new Blob([markup], { type: "image/svg+xml;charset=utf-8" }); const url = URL.createObjectURL(blob); const image = new Image();
-  await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error("图表渲染失败")); image.src = url; });
-  const canvas = document.createElement("canvas"); canvas.width = width * 2; canvas.height = height * 2; const context = canvas.getContext("2d"); if (!context) return; context.scale(2, 2); context.drawImage(image, 0, 0, width, height); URL.revokeObjectURL(url);
-  canvas.toBlob(png => { if (!png) return; const pngUrl = URL.createObjectURL(png); const anchor = document.createElement("a"); anchor.href = pngUrl; anchor.download = name; anchor.click(); URL.revokeObjectURL(pngUrl); }, "image/png");
 }
 
 function groupBySource(rows: CanonicalColorRow[]) {
@@ -90,14 +84,79 @@ function chartData(kind: ChartKind, rows: CanonicalColorRow[]) {
 }
 
 export function Task1VisualLab({ rows, fileName }: { rows: CanonicalColorRow[]; fileName: string }) {
-  const [kind, setKind] = useState<ChartKind>("hs-polar"); const [referenceA, setReferenceA] = useState(""); const [referenceB, setReferenceB] = useState(""); const plotRef = useRef<HTMLDivElement>(null);
+  const [kind, setKind] = useState<ChartKind>("hs-polar"); const [referenceA, setReferenceA] = useState(""); const [referenceB, setReferenceB] = useState(""); const [selectedEmotion, setSelectedEmotion] = useState(""); const [exporting, setExporting] = useState(false); const [exportStyle, setExportStyle] = useState<FigureExportStyle>({ columns: 5, width: 2850, scale: 2, showTitle: true }); const plotRef = useRef<HTMLDivElement>(null);
   const sources = [...new Set(rows.map(row => row.source))]; const effectiveA = sources.includes(referenceA) ? referenceA : (sources.includes("CN") ? "CN" : sources[0] || ""); const effectiveB = sources.includes(referenceB) && referenceB !== effectiveA ? referenceB : (sources.find(source => source === "BW" && source !== effectiveA) || sources.find(source => source !== effectiveA) || "");
-  const data = useMemo(() => chartData(kind, rows), [kind, rows]); const selected = CHARTS.find(chart => chart.id === kind)!; const needsReferences = ["parity", "bias-bars", "gravity", "slopegraph", "bias-density", "rank-heatmap", "difficulty-heatmap"].includes(kind);
+  const availableEmotions = GEW_EMOTIONS.filter(emotion => rows.some(row => row.emotion === emotion));
+  const effectiveEmotion = availableEmotions.includes(selectedEmotion as typeof GEW_EMOTIONS[number]) ? selectedEmotion : availableEmotions[0] || "";
+  const emotionFaceted = kind === "hs-polar" || kind === "vs-density";
+  const visibleRows = emotionFaceted && effectiveEmotion ? rows.filter(row => row.emotion === effectiveEmotion) : rows;
+  const data = useMemo(() => chartData(kind, visibleRows), [kind, visibleRows]); const selected = CHARTS.find(chart => chart.id === kind)!; const needsReferences = ["parity", "bias-bars", "gravity", "slopegraph", "bias-density", "rank-heatmap", "difficulty-heatmap"].includes(kind);
   const safeName = (fileName || "task1").replace(/\.[^.]+$/, "").replace(/\s+/g, "-");
+
+  const exportTitle = emotionFaceted && effectiveEmotion ? `${selected.label}：${effectiveEmotion}` : selected.label;
+  async function exportCurrentPng() {
+    setExporting(true);
+    try {
+      if (emotionFaceted) {
+        const blob = await renderPythonHsvPng({
+          kind,
+          emotion: effectiveEmotion,
+          rows: visibleRows,
+          groups: sources,
+          ...exportStyle,
+        });
+        downloadPngBlob(blob, `${effectiveEmotion}_${kind === "hs-polar" ? "HS" : "VS"}_Faceted.png`);
+      } else if (plotRef.current) {
+        await downloadPublicationPng(plotRef.current, `${safeName}_${kind}.png`, {
+          minimumWidth: exportStyle.width,
+          minimumHeight: Math.max(760, Math.round(exportStyle.width * .72)),
+          scale: exportStyle.scale,
+          showTitle: exportStyle.showTitle,
+          title: exportTitle,
+          subtitle: `${sources.length} 个独立来源 · ${visibleRows.length.toLocaleString()} 个色彩观察 · 白底论文分面`,
+        });
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "PNG 导出失败。");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function exportAllEmotionFacets() {
+    if (!emotionFaceted || !availableEmotions.length) return;
+    setExporting(true);
+    try {
+      const { zipSync } = await import("fflate");
+      const files: Record<string, Uint8Array> = {};
+      for (const emotion of availableEmotions) {
+        const blob = await renderPythonHsvPng({
+          kind,
+          emotion,
+          rows: rows.filter(row => row.emotion === emotion),
+          groups: sources,
+          ...exportStyle,
+        });
+        files[`${emotion}_${kind === "hs-polar" ? "HS" : "VS"}_Faceted.png`] = new Uint8Array(await blob.arrayBuffer());
+      }
+      const url = URL.createObjectURL(new Blob([zipSync(files, { level: 1 })], { type: "application/zip" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${safeName}_${kind}_20-emotions.zip`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "20 情绪分面图导出失败。");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return <section className="visual-lab panel">
-    <div className="visual-lab-head"><div><span className="eyebrow">历史脚本可视化图谱</span><h3>{selected.label}</h3><p>对应 {selected.script} · 当前筛选 {rows.length.toLocaleString()} 个色彩观察</p></div><div className="visual-export"><button className="secondary" disabled={!data.length} onClick={() => download(`${safeName}_${kind}.csv`, toCsv(data))}>导出图表数据 CSV</button><button className="primary" disabled={!rows.length} onClick={() => plotRef.current && void downloadElementPng(plotRef.current, `${safeName}_${kind}.png`)}>导出图表 PNG</button></div></div>
-    <div className="visual-lab-controls"><label>可视化分析<select value={kind} onChange={event => setKind(event.target.value as ChartKind)}>{[...new Set(CHARTS.map(chart => chart.group))].map(group => <optgroup key={group} label={group}>{CHARTS.filter(chart => chart.group === group).map(chart => <option key={chart.id} value={chart.id}>{chart.label}</option>)}</optgroup>)}</select></label>{needsReferences ? <><label>参照 A<select value={effectiveA} onChange={event => setReferenceA(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label><label>参照 B<select value={effectiveB} onChange={event => setReferenceB(event.target.value)}>{sources.filter(source => source !== effectiveA).map(source => <option key={source}>{source}</option>)}</select></label></> : null}</div>
-    <div className="visual-stage" ref={plotRef}>{!rows.length ? <VisualEmpty /> : kind === "hs-polar" ? <HsPolar rows={rows} /> : kind === "vs-density" ? <VsDensity rows={rows} /> : kind === "lab-ab-density" ? <LabAbDensity rows={rows} /> : kind === "lab-distribution" ? <LabDistributions rows={rows} /> : kind === "mosaic" ? <Mosaic rows={rows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}</div>
+    <div className="visual-lab-head"><div><span className="eyebrow">{emotionFaceted ? "PYTHON · MATPLOTLIB 原生导出" : "PYTHON PAPER STYLE · 300 DPI READY"}</span><h3>{exportTitle}</h3><p>对应 {selected.script} · 当前图 {visibleRows.length.toLocaleString()} 个观察 · {emotionFaceted ? "直接对应 hsvplot.py；最终 PNG 无网页卡片边框" : "当前分析视图"}</p></div><div className="visual-export"><button className="secondary" disabled={!data.length} onClick={() => download(`${safeName}_${kind}.csv`, toCsv(data))}>导出图表数据 CSV</button></div></div>
+    <div className="visual-lab-controls"><label>可视化分析<select value={kind} onChange={event => setKind(event.target.value as ChartKind)}>{[...new Set(CHARTS.map(chart => chart.group))].map(group => <optgroup key={group} label={group}>{CHARTS.filter(chart => chart.group === group).map(chart => <option key={chart.id} value={chart.id}>{chart.label}</option>)}</optgroup>)}</select></label>{emotionFaceted ? <label>情绪分面图<select value={effectiveEmotion} onChange={event => setSelectedEmotion(event.target.value)}>{availableEmotions.map(emotion => <option key={emotion}>{emotion}</option>)}</select></label> : null}{needsReferences ? <><label>参照 A<select value={effectiveA} onChange={event => setReferenceA(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label><label>参照 B<select value={effectiveB} onChange={event => setReferenceB(event.target.value)}>{sources.filter(source => source !== effectiveA).map(source => <option key={source}>{source}</option>)}</select></label></> : null}</div>
+    <FigureExportControls value={exportStyle} onChange={setExportStyle} onExport={() => void exportCurrentPng()} exportLabel={emotionFaceted ? "Python 导出当前 PNG" : "导出当前视图 PNG"} disabled={!visibleRows.length} busy={exporting} batchAction={emotionFaceted ? { label: `Python 批量导出 ${availableEmotions.length} 个情绪 ZIP`, onClick: () => void exportAllEmotionFacets(), disabled: !availableEmotions.length } : undefined} />
+    <div className="visual-stage python-paper-view" ref={plotRef} style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>{!visibleRows.length ? <VisualEmpty /> : kind === "hs-polar" ? <HsPolar rows={visibleRows} /> : kind === "vs-density" ? <VsDensity rows={visibleRows} /> : kind === "lab-ab-density" ? <LabAbDensity rows={visibleRows} /> : kind === "lab-distribution" ? <LabDistributions rows={visibleRows} /> : kind === "mosaic" ? <Mosaic rows={visibleRows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}</div>
   </section>;
 }
 

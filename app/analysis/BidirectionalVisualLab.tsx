@@ -1,11 +1,22 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, type ExportRow } from "./engine";
+import { downloadPublicationPng } from "./export-png";
+import { FigureExportControls, type FigureExportStyle } from "./FigureExportControls";
 
 type View = "groups" | "groupMatrix" | "pairDifference" | "paired" | "symmetry" | "asymmetry" | "scatter";
 type QMetric = "probability" | "conditional" | "overall";
 type CohortSummaryMetric = "rank" | "jsd" | "top1" | "asymmetry";
+const VIEW_TITLES: Record<View, string> = {
+  groups: "八组情绪指标总览",
+  groupMatrix: "8×8 组间矩阵",
+  pairDifference: "任选两组差值",
+  paired: "八来源 P / Q 明细",
+  symmetry: "单来源情绪一致性",
+  asymmetry: "方向差热图（综合）",
+  scatter: "双向散点（综合）",
+};
 const Q_METRICS: Record<QMetric, { label: string; field: string; rank: string; jsd: string }> = {
   probability: { label: "关联概率", field: "色选词归一化概率", rank: "情绪颜色排序Spearman_概率", jsd: "JSD相似度_关联概率" },
   conditional: { label: "条件强度", field: "色选词归一化条件强度", rank: "情绪颜色排序Spearman_条件强度", jsd: "JSD相似度_条件强度" },
@@ -33,6 +44,8 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
   const [selectedA, setSelectedA] = useState(""), [selectedB, setSelectedB] = useState("");
   const [view, setView] = useState<View>("groups");
   const [qMetric, setQMetric] = useState<QMetric>("probability");
+  const [exportStyle, setExportStyle] = useState<FigureExportStyle>({ columns: 3, width: 1800, scale: 2, showTitle: true });
+  const canvasRef = useRef<HTMLDivElement>(null);
   const source = sources.includes(selectedSource) ? selectedSource : sources[0] || "";
   const emotions = GEW_EMOTIONS.filter(emotion => rows.some(row => labelOf(row, "情绪") === emotion));
   const emotion = emotions.includes(selectedEmotion as typeof GEW_EMOTIONS[number]) ? selectedEmotion : emotions[0] || "";
@@ -63,7 +76,7 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
 
   if (!rows.length) return <div className="dashboard-empty"><span>⇄</span><b>需要同一来源的两项实验数据</b><small>词选色和色选词都存在时，平台才会生成群体层面的双向一致性。</small></div>;
 
-  return <section className="bidirectional-lab panel">
+  return <section className="bidirectional-lab panel python-paper-view" style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>
     <div className="panel-head bidirectional-head">
       <div><span className="eyebrow">EIGHT-GROUP BIDIRECTIONAL COMPARISON</span><h3>四个人类组与四个 AI 组双向比较</h3><p>8个试验组全部保留为独立比较单位；人类/AI只作为组标签，不在默认看板中合并。</p></div>
       {!["groups", "groupMatrix", "pairDifference", "paired"].includes(view) ? <label>来源<select value={source} onChange={event => setSelectedSource(event.target.value)}>{sources.map(item => <option key={item}>{item}</option>)}</select></label> : <label>Q 口径<select value={qMetric} onChange={event => setQMetric(event.target.value as QMetric)}>{Object.entries(Q_METRICS).map(([key, item]) => <option value={key} key={key}>{item.label}</option>)}</select></label>}
@@ -77,7 +90,15 @@ export function BidirectionalVisualLab({ rows }: { rows: ExportRow[] }) {
       <button className={view === "asymmetry" ? "active" : ""} onClick={() => setView("asymmetry")}>方向差热图（综合）</button>
       <button className={view === "scatter" ? "active" : ""} onClick={() => setView("scatter")}>双向散点（综合）</button>
     </div>
-    <div className="bidirectional-canvas">
+    <FigureExportControls value={exportStyle} onChange={setExportStyle} onExport={() => canvasRef.current && void downloadPublicationPng(canvasRef.current, `bidirectional_${view}.png`, {
+      minimumWidth: exportStyle.width,
+      minimumHeight: Math.max(760, Math.round(exportStyle.width * .62)),
+      scale: exportStyle.scale,
+      showTitle: exportStyle.showTitle,
+      title: VIEW_TITLES[view],
+      subtitle: `${sources.length} 个独立来源 · 当前 Q 口径：${Q_METRICS[qMetric].label}`,
+    }).catch(error => window.alert(error instanceof Error ? error.message : "PNG 导出失败。"))} disabled={!rows.length} />
+    <div className="bidirectional-canvas" ref={canvasRef}>
       {view === "groups" ? <EightGroupOverview rows={uniqueSourceEmotionRows} qMetric={qMetric} sources={sources} sourceCohorts={sourceCohorts} /> : null}
       {view === "groupMatrix" ? <BidirectionalGroupMatrix rows={uniqueSourceEmotionRows} qMetric={qMetric} sources={sources} sourceCohorts={sourceCohorts} /> : null}
       {view === "pairDifference" ? <BidirectionalPairDifference rows={rows} qMetric={qMetric} sourceA={effectiveA} sourceB={effectiveB} sources={sources} onSourceA={setSelectedA} onSourceB={setSelectedB} /> : null}

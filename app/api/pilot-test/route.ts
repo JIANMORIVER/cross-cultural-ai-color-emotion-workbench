@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { applyRandomnessPolicy } from "../../experiment/randomness";
 import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
-import { buildChatRequest, safeEndpoint } from "../../experiment/model-request";
+import { buildChatRequest, friendlyModelApiError, safeEndpoint } from "../../experiment/model-request";
 import { parseAssociationResponse, parseColorResponse } from "../../experiment/response-parser";
 
 const PROJECT_ID = "ECX-2026-001";
@@ -38,13 +38,15 @@ export async function POST(request: Request) {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${body.apiKey}` },
       body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(60_000),
     });
     const payload = await response.json().catch(() => ({})) as {
       error?: { message?: string };
       choices?: Array<{ message?: { content?: string } }>;
     };
     if (!response.ok) {
-      return Response.json({ ok: false, message: payload.error?.message || `模型接口返回 HTTP ${response.status}` }, { status: 400 });
+      const detail = payload.error?.message || `模型接口返回 HTTP ${response.status}`;
+      throw new Error(friendlyModelApiError(body.model.model_id, response.status, detail));
     }
 
     const rawResponse = payload.choices?.[0]?.message?.content || "";

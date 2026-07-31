@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { applyRandomnessPolicy } from "../../experiment/randomness";
 import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
-import { buildChatRequest, safeEndpoint } from "../../experiment/model-request";
+import { buildChatRequest, friendlyModelApiError, safeEndpoint } from "../../experiment/model-request";
 import { parseAssociationResponse, parseColorResponse } from "../../experiment/response-parser";
 
 const PROJECT_ID = "ECX-2026-001";
@@ -104,11 +104,12 @@ export async function POST(request: Request) {
     };
     if (!response.ok) {
       const retryAfter = response.headers.get("retry-after");
-      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       const errorParts = [payload.error?.message || `模型接口返回 HTTP ${response.status}`];
       if (payload.error?.code) errorParts.push(`code=${payload.error.code}`);
       if (payload.error?.param) errorParts.push(`param=${payload.error.param}`);
-      const message = errorParts.join(" · ");
+      const message = friendlyModelApiError(body.model.model_id, response.status, errorParts.join(" · "));
+      const paidTierRequired = message.startsWith("Gemini 3.1 Pro Preview 不提供免费 API 层");
+      const retryable = !paidTierRequired && (response.status === 408 || response.status === 429 || response.status >= 500);
       await saveAttempt({
         logicalTrialId, model: body.model, trial, attemptNo, status: "api_error",
         httpStatus: response.status, retryable, errorMessage: message,

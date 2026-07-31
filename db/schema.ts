@@ -106,3 +106,8 @@ export const trialManifest = sqliteTable("trial_manifest", {
   repairAttemptedAt: text("repair_attempted_at"),
   completedAt: text("completed_at"),
 });
+
+export const appMigrations = sqliteTable("app_migrations", {
+  id: text("id").primaryKey(),
+  appliedAt: text("applied_at").notNull(),
+});

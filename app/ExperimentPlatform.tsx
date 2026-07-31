@@ -4,6 +4,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnalysisPlatform } from "./AnalysisPlatform";
 import { experimentOrders } from "./experiment/prompts";
 import {
+  isDoubao21Pro,
+  isGemini31Pro,
+  isGemini36Flash,
+  reasoningModeForModel,
+  supportsSamplingControls,
+} from "./experiment/model-request";
+import {
   buildColorToEmotionRows,
   buildColorToEmotionSourceRows,
   buildExperimentConditionRows,
@@ -158,10 +165,10 @@ const defaultSettings: Settings = {
 };
 
 const defaultModels: Model[] = [
-  { id: "model-gpt", provider: "OpenAI", alias: "GPT", model_id: "gpt-5.6", base_url: "https://api.openai.com/v1", api_format: "OpenAI Chat Completions", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
-  { id: "model-deepseek", provider: "DeepSeek", alias: "DeepSeek", model_id: "deepseek-chat", base_url: "https://api.deepseek.com/v1", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
-  { id: "model-doubao", provider: "ByteDance", alias: "Doubao", model_id: "doubao-seed-1-6", base_url: "https://ark.cn-beijing.volces.com/api/v3", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
-  { id: "model-gemini", provider: "Google", alias: "Gemini", model_id: "gemini-2.5-flash", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_format: "OpenAI-compatible", max_tokens: 500, temperature: .8, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-gpt", provider: "OpenAI", alias: "GPT", model_id: "gpt-5.6", base_url: "https://api.openai.com/v1", api_format: "OpenAI Chat Completions", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-deepseek", provider: "DeepSeek", alias: "DeepSeek", model_id: "deepseek-v4-pro", base_url: "https://api.deepseek.com", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-doubao", provider: "ByteDance", alias: "Doubao", model_id: "doubao-seed-2-1-pro-260628", base_url: "https://ark.cn-beijing.volces.com/api/v3", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-gemini", provider: "Google", alias: "Gemini", model_id: "gemini-3.1-pro-preview", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
 ];
 
 const MODEL_VARIANTS = {
@@ -171,14 +178,18 @@ const MODEL_VARIANTS = {
     ["GPT 4.1 Mini（旧版对照）", "gpt-4.1-mini"],
   ],
   google: [
-    ["Gemini 3.5 Flash", "gemini-3.5-flash"], ["Flash 最新版", "gemini-flash-latest"],
-    ["Pro 最新版", "gemini-pro-latest"], ["Gemini 2.5 Flash", "gemini-2.5-flash"], ["Gemini 2.5 Pro", "gemini-2.5-pro"],
+    ["Gemini 3.6 Flash（稳定版）", "gemini-3.6-flash"],
+    ["Gemini 3.1 Pro Preview", "gemini-3.1-pro-preview"],
+    ["Gemini 3.5 Flash（旧版对照）", "gemini-3.5-flash"],
+    ["Gemini 2.5 Flash（旧版对照）", "gemini-2.5-flash"],
   ],
   deepseek: [
     ["DeepSeek V4 Flash", "deepseek-v4-flash"], ["DeepSeek V4 Pro", "deepseek-v4-pro"],
   ],
   bytedance: [
-    ["Doubao Seed 2.0 Pro", "doubao-seed-2-0-pro-260215"], ["Doubao Seed 1.6", "doubao-seed-1-6"],
+    ["Doubao Seed 2.1 Pro", "doubao-seed-2-1-pro-260628"],
+    ["Doubao Seed 2.0 Pro（旧版对照）", "doubao-seed-2-0-pro-260215"],
+    ["Doubao Seed 1.6（旧版对照）", "doubao-seed-1-6"],
   ],
 } as const;
 
@@ -188,6 +199,19 @@ function variantsFor(model: Model) {
   if (signature.includes("deepseek")) return MODEL_VARIANTS.deepseek;
   if (signature.includes("byte") || signature.includes("volc") || signature.includes("doubao")) return MODEL_VARIANTS.bytedance;
   return MODEL_VARIANTS.openai;
+}
+
+function modelVariantPatch(model: Model, modelId: string): Partial<Model> {
+  return {
+    model_id: modelId,
+    api_format: modelId.startsWith("gpt-5.6") ? "OpenAI Chat Completions" : model.api_format,
+    supports_seed: modelId.startsWith("gpt-5.6") ? false : model.supports_seed,
+    max_tokens: 2048,
+    temperature: 1,
+    top_p: 1,
+    last_test_status: "Not tested",
+    latency_ms: null,
+  };
 }
 
 function bool(value: number | boolean) { return value === true || value === 1; }
@@ -249,6 +273,7 @@ export function ExperimentPlatform() {
   const [testing, setTesting] = useState(false);
   const [pilotTesting, setPilotTesting] = useState<"" | "word" | "color">("");
   const [runnerState, setRunnerState] = useState<RunnerState>("idle");
+  const [startingRun, setStartingRun] = useState(false);
   const runnerStateRef = useRef<RunnerState>("idle");
   const activeRunGroupsRef = useRef(0);
   const launchedModelIdsRef = useRef<Set<string>>(new Set());
@@ -386,10 +411,14 @@ export function ExperimentPlatform() {
     persist("saveSettings", next as unknown as Record<string, unknown>, `${model?.alias || "当前模型"} 已加入并行实验组（${nextIds.length}/4）；各模型结果会独立分组。`);
   }
 
+  function setModelKey(modelId: string, value: string) {
+    setKeys(current => ({ ...current, [modelId]: value }));
+    if (value) sessionStorage.setItem(`chromalab-key-${modelId}`, value);
+    else sessionStorage.removeItem(`chromalab-key-${modelId}`);
+  }
+
   function setKey(value: string) {
-    setKeys(current => ({ ...current, [selectedModel.id]: value }));
-    if (value) sessionStorage.setItem(`chromalab-key-${selectedModel.id}`, value);
-    else sessionStorage.removeItem(`chromalab-key-${selectedModel.id}`);
+    setModelKey(selectedModel.id, value);
   }
 
   function changeRunnerState(next: RunnerState) {
@@ -591,16 +620,22 @@ export function ExperimentPlatform() {
       return;
     }
     candidateModels.forEach(model => startingModelIdsRef.current.add(model.id));
-    const releaseStarting = () => candidateModels.forEach(model => startingModelIdsRef.current.delete(model.id));
+    setStartingRun(true);
+    const releaseStarting = () => {
+      candidateModels.forEach(model => startingModelIdsRef.current.delete(model.id));
+      setStartingRun(false);
+      setRunActivity("");
+    };
     const missing = candidateModels.filter(m => !keys[m.id]);
     if (missing.length) {
       releaseStarting();
       setNotice(`开始前请为 ${missing.map(m => m.alias).join("、")} 添加临时 API Key。`);
       return;
     }
-    setNotice("正在执行正式运行前检查：连接、任务一格式、任务二格式…");
+    setNotice("正在执行正式运行前检查：连接、任务一格式、任务二格式；临时 503/429 将自动退避重试…");
     for (const model of candidateModels) {
       try {
+        setRunActivity(`运行前检查 · ${model.alias} · 验证连接与两项输出格式`);
         const preflightResponse = await fetch("/api/model-test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -708,13 +743,17 @@ export function ExperimentPlatform() {
             }),
           });
           const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: ResultRow; message?: string; retryAfter?: string | null; retryable?: boolean };
-          if (response.ok && data.ok && data.result) return data.result;
+          if (response.ok && data.ok && data.result) {
+            return data.result;
+          }
           lastMessage = data.message || `请求失败（HTTP ${response.status}）`;
           if (data.retryable === false) break;
           if (attempt < immediateRetryLimit) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
             const retryAfter = Number(data.retryAfter);
-            await wait(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : Math.min(5000, 700 * 2 ** attempt));
+            await wait(Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter * 1000
+              : Math.min(5000, 700 * 2 ** attempt) + Math.floor(Math.random() * 350));
           }
         } catch (error) {
           lastMessage = error instanceof DOMException && error.name === "AbortError"
@@ -722,7 +761,7 @@ export function ExperimentPlatform() {
             : error instanceof Error ? error.message : "网络请求失败。";
           if (attempt < immediateRetryLimit) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
-            await wait(Math.min(5000, 700 * 2 ** attempt));
+            await wait(Math.min(5000, 700 * 2 ** attempt) + Math.floor(Math.random() * 350));
           }
         } finally {
           window.clearTimeout(timeoutId);
@@ -924,7 +963,7 @@ export function ExperimentPlatform() {
           {page === "setup" && <SetupPage project={project} setProject={setProject} save={() => persist("saveProject", project as unknown as Record<string, unknown>, "项目详情已保存。")} />}
           {page === "models" && <ModelsPage models={models} selected={selectedModel} select={setSelectedModelId} patch={patchModel} save={saveModel} apiKey={keys[selectedModel.id] || ""} setKey={setKey} testing={testing} test={testConnection} pilotTesting={pilotTesting} pilotTest={pilotTest} prepareSingle={() => prepareSingleModel(selectedModel.id)} />}
           {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} launchedModelIds={launchedModelIds} running={runnerState === "running"} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
-          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} pendingCount={pendingRunModels.length} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} lastError={lastRunError} activity={runActivity} repairCount={repairTrials.length} repairExhaustedCount={repairExhaustedCount} repairChecking={repairChecking} repairing={repairing} scanMissing={() => scanMissingTrials(runModels.map(model => model.id))} repairMissing={repairMissingTrials} />}
+          {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} starting={startingRun} pendingCount={pendingRunModels.length} total={totalRequests} stats={runStats} modelProgress={modelRunProgress} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} setModelKey={setModelKey} lastError={lastRunError} activity={runActivity} repairCount={repairTrials.length} repairExhaustedCount={repairExhaustedCount} repairChecking={repairChecking} repairing={repairing} scanMissing={() => scanMissingTrials(runModels.map(model => model.id))} repairMissing={repairMissingTrials} />}
           {page === "review" && <ReviewPage results={filteredResults} failures={recentFailures} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
           {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} includeIncomplete={includeIncompleteExports} setIncludeIncomplete={setIncludeIncompleteExports} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
           {page === "analysis" && <AnalysisPlatform />}
@@ -977,6 +1016,11 @@ function SetupPage({ project, setProject, save }: { project: Project; setProject
 
 function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, testing, test, pilotTesting, pilotTest, prepareSingle }: { models: Model[]; selected: Model; select: (id: string) => void; patch: (p: Partial<Model>) => void; save: () => void; apiKey: string; setKey: (v: string) => void; testing: boolean; test: () => void; pilotTesting: "" | "word" | "color"; pilotTest: (task: "word" | "color") => void; prepareSingle: () => void }) {
   const variants = variantsFor(selected);
+  const samplingControls = supportsSamplingControls(selected.model_id);
+  const gemini36 = isGemini36Flash(selected.model_id);
+  const gemini31Pro = isGemini31Pro(selected.model_id);
+  const doubao21Pro = isDoubao21Pro(selected.model_id);
+  const reasoningMode = reasoningModeForModel(selected.model_id, selected.base_url);
   return <>
     <PageTitle index="02" title="连接模型队列" subtitle="在可比较的参数条件下配置每个模型；凭证仅保留在当前浏览器会话中。" action={<button className="secondary">＋ 添加模型</button>} />
     <div className="model-layout">
@@ -994,19 +1038,22 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
           <label>模型别名<input value={selected.alias} onChange={e => patch({ alias: e.target.value })} /></label>
           <div className="model-version-picker span-2">
             <div className="version-picker-head"><div><span className="eyebrow">具体模型型号</span><b>选择 Flash、Pro 或其他版本</b></div><Pill tone="blue">当前：{selected.model_id}</Pill></div>
-            <div className="variant-chips">{variants.map(([label, id]) => <button type="button" key={id} className={selected.model_id === id ? "active" : ""} onClick={() => patch({ model_id: id, api_format: id.startsWith("gpt-5.6") ? "OpenAI Chat Completions" : selected.api_format, supports_seed: id.startsWith("gpt-5.6") ? false : selected.supports_seed, last_test_status: "Not tested", latency_ms: null })}><b>{label}</b><small>{id}</small></button>)}</div>
+            <div className="variant-chips">{variants.map(([label, id]) => <button type="button" key={id} className={selected.model_id === id ? "active" : ""} onClick={() => patch(modelVariantPatch(selected, id))}><b>{label}</b><small>{id}</small></button>)}</div>
             <label>自定义 Model ID<input className="mono" value={selected.model_id} onChange={e => patch({ model_id: e.target.value })} /></label>
-            <small className="version-note">GPT‑5.6 是当前系列；gpt-5.6 默认指向旗舰 Sol。列表是快捷选择，也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。</small>
+            <small className="version-note">{gemini36 ? "Gemini 3.6 Flash 为稳定版；该型号已弃用 Temperature 与 Top P，平台会按接口要求省略。" : gemini31Pro ? "Gemini 3.1 Pro 当前为 Preview 且不提供免费 API 层；平台固定 Temperature 1.0、Top P 1.0、low thinking 与严格 JSON Schema。" : doubao21Pro ? "Doubao-Seed-2.1-Pro 为文本深度思考模型；本实验固定关闭深度思考。若控制台提供的是推理接入点，请将 Model ID 改为对应的 ep-… ID。" : "列表是快捷选择，也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。"}</small>
           </div>
           <label className="span-2">接口地址 Base URL<input className="mono" value={selected.base_url} onChange={e => patch({ base_url: e.target.value })} /></label>
           <label className="span-2">临时 API Key<div className="secret-field"><input type="password" value={apiKey} placeholder="sk-••••••••••••••••" autoComplete="off" onChange={e => setKey(e.target.value)} /><span>仅本次会话</span></div><small className="field-note">传输过程加密，绝不写入项目数据库或导出文件。</small></label>
           <div className="randomness-parameters span-2">
             <div className="randomness-head"><div><span className="eyebrow">模型采样参数</span><b>随机性控件</b></div><small>每个模型单独保存，并写入导出条件表</small></div>
             <div className="parameter-grid">
-              <label><span>Temperature <b>{selected.temperature.toFixed(1)}</b></span><input type="range" min="0" max="2" step="0.1" value={selected.temperature} onChange={e => patch({ temperature: number(e.target.value) })} /><small>低值更稳定，高值更多样</small></label>
-              <label><span>Top P <b>{selected.top_p.toFixed(2)}</b></span><input type="range" min="0" max="1" step="0.05" value={selected.top_p} onChange={e => patch({ top_p: number(e.target.value) })} /><small>控制候选词概率范围</small></label>
-              <label><span>最大输出 Token <b>{selected.max_tokens}</b></span><input type="number" min="64" max="32768" step="64" value={selected.max_tokens} onChange={e => patch({ max_tokens: number(e.target.value) })} /><small>限制单次回答长度</small></label>
+              <label className={!samplingControls ? "parameter-locked" : ""}><span>Temperature <b>{samplingControls ? selected.temperature.toFixed(1) : "模型默认"}</b></span><input type="range" min="0" max="2" step="0.1" value={selected.temperature} disabled={!samplingControls} onChange={e => patch({ temperature: number(e.target.value) })} /><small>{samplingControls ? "正式协议默认 1.0" : "当前型号请求中不发送"}</small></label>
+              <label className={!samplingControls ? "parameter-locked" : ""}><span>Top P <b>{samplingControls ? selected.top_p.toFixed(2) : "模型默认"}</b></span><input type="range" min="0" max="1" step="0.05" value={selected.top_p} disabled={!samplingControls} onChange={e => patch({ top_p: number(e.target.value) })} /><small>{samplingControls ? "正式协议默认 1.00" : "当前型号请求中不发送"}</small></label>
+              <label><span>最大输出 Token <b>{selected.max_tokens}</b></span><input type="number" min="64" max="32768" step="64" value={selected.max_tokens} onChange={e => patch({ max_tokens: number(e.target.value) })} /><small>正式协议默认 2048</small></label>
             </div>
+            {gemini36
+              ? <div className="parameter-notice"><b>Gemini 3.6 采样策略</b><span>Temperature / Top P 已弃用，平台会完全省略这两个字段；推理模式固定为 low。</span></div>
+              : <div className="parameter-notice"><b>统一实验协议</b><span>{`Temperature 1.0 · Top P 1.0 · 2048 Token · 推理模式 ${reasoningMode}`}</span></div>}
           </div>
           <label>每分钟请求上限<input type="number" value={selected.rate_limit} onChange={e => patch({ rate_limit: number(e.target.value) })} /></label>
         </div>
@@ -1094,14 +1141,21 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
   </>;
 }
 
-function RunnerPage({ state, setState, start, pendingCount, total, stats, modelProgress, settings, models, launchedModelIds, keys, lastError, activity, repairCount, repairExhaustedCount, repairChecking, repairing, scanMissing, repairMissing }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; pendingCount: number; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; launchedModelIds: string[]; keys: Record<string, string>; lastError: string; activity: string; repairCount: number; repairExhaustedCount: number; repairChecking: boolean; repairing: boolean; scanMissing: () => void; repairMissing: () => void }) {
+function RunnerPage({ state, setState, start, starting, pendingCount, total, stats, modelProgress, settings, models, launchedModelIds, keys, setModelKey, lastError, activity, repairCount, repairExhaustedCount, repairChecking, repairing, scanMissing, repairMissing }: { state: RunnerState; setState: (s: RunnerState) => void; start: () => void; starting: boolean; pendingCount: number; total: number; stats: RunStats; modelProgress: ModelRunProgress; settings: Settings; models: Model[]; launchedModelIds: string[]; keys: Record<string, string>; setModelKey: (modelId: string, value: string) => void; lastError: string; activity: string; repairCount: number; repairExhaustedCount: number; repairChecking: boolean; repairing: boolean; scanMissing: () => void; repairMissing: () => void }) {
   const pct = total ? Math.min(100, stats.completed / total * 100) : 0;
   const wordTotal = bool(settings.run_word_to_color) ? settings.repetitions * 20 : 0;
   const colorTotal = bool(settings.run_color_to_emotion) ? settings.repetitions * 11 : 0;
   const averageLatency = stats.valid ? Math.round(stats.latencyTotal / stats.valid) : 0;
   const stateLabel = state === "running" ? "正在派发请求" : state === "paused" ? "队列已暂停" : state === "completed" ? "队列已完成" : "等待开始";
+  const missingModels = models.filter(model => !keys[model.id]);
+  const geminiSafeProtocol = models.length === 1 && isGemini31Pro(models[0].model_id);
   return <>
-    <PageTitle index="04" title="运行试次队列" subtitle="最多四个单模型实验组并行运行；进度、失败与结果按模型独立记录。" action={<div className="runner-actions">{state === "running" ? <><button className="secondary" onClick={() => setState("paused")}>Ⅱ 暂停全部</button>{pendingCount ? <button className="primary" onClick={start}>＋ 启动新增 {pendingCount} 组</button> : <button className="secondary" disabled>已运行 {launchedModelIds.length} / 4 组</button>}</> : <button className="primary" onClick={state === "paused" ? () => setState("running") : start}>{state === "paused" ? "恢复全部运行" : state === "completed" ? "重新运行所选组" : "开始并行实验"}</button>}</div>} />
+    <PageTitle index="04" title="运行试次队列" subtitle="最多四个单模型实验组并行运行；进度、失败与结果按模型独立记录。" action={<div className="runner-actions">{state === "running" ? <><button className="secondary" onClick={() => setState("paused")}>Ⅱ 暂停全部</button>{pendingCount ? <button className="primary" onClick={start} disabled={starting}>{starting ? "新增组检查中…" : `＋ 启动新增 ${pendingCount} 组`}</button> : <button className="secondary" disabled>已运行 {launchedModelIds.length} / 4 组</button>}</> : <button className="primary" disabled={starting || (state !== "paused" && missingModels.length > 0)} onClick={state === "paused" ? () => setState("running") : start}>{state === "paused" ? "恢复全部运行" : starting ? "运行前检查中…" : missingModels.length ? `请先填写 ${missingModels[0].alias} API Key` : state === "completed" ? "重新运行所选组" : "开始并行实验"}</button>}</div>} />
+    {missingModels.length && state !== "running" ? <section className="runner-key-panel panel">
+      <div><span className="eyebrow">启动所需凭证</span><h3>在本页补充临时 API Key</h3><p>Key 只保存在当前标签页会话中，不写入数据库、失败日志或导出文件。刷新后仍保留，关闭标签页后自动失效。</p></div>
+      <div className="runner-key-fields">{missingModels.map(model => <label key={model.id}><span>{model.alias}<small>{model.model_id}</small></span><div className="secret-field"><input type="password" value={keys[model.id] || ""} placeholder="粘贴临时 API Key" autoComplete="off" onChange={event => setModelKey(model.id, event.target.value)} /><span>仅本次会话</span></div></label>)}</div>
+    </section> : null}
+    {geminiSafeProtocol ? <section className="collection-policy-panel panel"><div><span className="eyebrow">Gemini 稳妥采集协议</span><h3>实时 API · 单模型并发 1 · 仅补技术失败</h3><p>固定 gemini-3.1-pro-preview、Temperature 1.0、Top P 1.0、2048 Token 与 low thinking；最多 3 次尝试，短指数退避并加入随机抖动，不切换模型、不使用 Batch、不重新抽取有效回答。</p></div><Pill tone="green">条件已锁定</Pill></section> : null}
     <section className="run-hero">
       <div className="run-number"><span>总体进度</span><strong>{stats.completed.toLocaleString()} <em>/ {total.toLocaleString()}</em></strong><div className="progress"><i style={{ width: `${pct}%` }} /></div><small>已完成 {pct.toFixed(1)}% · {stateLabel}{stats.active ? ` · ${stats.active} 个请求处理中` : ""}</small>{activity ? <small className="run-activity">当前：{activity}</small> : null}</div>
       <div className="run-metrics"><div><span>✓</span><p><b>{stats.valid.toLocaleString()}</b><small>有效</small></p></div><div><span>↻</span><p><b>{stats.retries.toLocaleString()}</b><small>已重试</small></p></div><div><span>×</span><p><b>{stats.failed.toLocaleString()}</b><small>失败</small></p></div><div><span>⏱</span><p><b>{averageLatency ? `${averageLatency} ms` : "—"}</b><small>平均延迟</small></p></div></div>

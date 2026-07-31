@@ -1,16 +1,21 @@
-import { buildChatRequest, safeEndpoint, type RequestModel } from "../../experiment/model-request";
+import {
+  buildChatRequest,
+  friendlyModelApiError,
+  safeEndpoint,
+  type RequestModel,
+} from "../../experiment/model-request";
 import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
 import { parseAssociationResponse, parseColorResponse } from "../../experiment/response-parser";
 
 type TestBody = {
   apiKey: string;
   model?: RequestModel;
-  settings?: OrderPolicy;
+  settings?: OrderPolicy & { timeout_seconds?: number };
   baseUrl?: string;
   modelId?: string;
 };
 
-const fallbackSettings: OrderPolicy = {
+const fallbackSettings: OrderPolicy & { timeout_seconds: number } = {
   prompt_seed_enabled: false,
   prompt_seed_base: 20260715,
   native_seed_enabled: false,
@@ -18,36 +23,77 @@ const fallbackSettings: OrderPolicy = {
   shuffle_emotion_order: false,
   shuffle_color_order: false,
   shuffle_emotion_options: false,
+  timeout_seconds: 60,
 };
 
-async function runProbe(apiKey: string, model: RequestModel, prompt: string, task: "word" | "color") {
-  const response = await fetch(safeEndpoint(model.base_url), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
-    body: JSON.stringify(buildChatRequest(model, prompt, task)),
-  });
-  const payloadText = await response.text();
-  const payload = (() => {
-    try { return JSON.parse(payloadText); } catch { return {}; }
-  })() as {
-    error?: { message?: string; code?: string; param?: string };
-    choices?: Array<{ finish_reason?: string; message?: { content?: string; refusal?: string | null } }>;
-  };
-  if (!response.ok) {
-    const detail = [
-      payload.error?.message || `HTTP ${response.status}`,
-      payload.error?.code ? `code=${payload.error.code}` : "",
-      payload.error?.param ? `param=${payload.error.param}` : "",
-    ].filter(Boolean).join(" · ");
-    throw new Error(detail);
+const MAX_PROBE_ATTEMPTS = 3;
+
+function transientStatus(status: number) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function retryDelayMs(response: Response, attempt: number) {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.min(30_000, seconds * 1000);
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.min(30_000, Math.max(0, retryAt - Date.now()));
   }
-  const content = payload.choices?.[0]?.message?.content || "";
-  if (!content) {
-    const refusal = payload.choices?.[0]?.message?.refusal;
-    throw new Error(refusal ? `模型拒绝测试请求：${refusal}` : "测试响应没有可读取内容。");
+  const exponential = Math.min(8000, 1000 * 2 ** attempt);
+  return exponential + Math.floor(Math.random() * 350);
+}
+
+async function runProbe(apiKey: string, model: RequestModel, prompt: string, task: "word" | "color", timeoutSeconds: number) {
+  for (let attempt = 0; attempt < MAX_PROBE_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(safeEndpoint(model.base_url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+        body: JSON.stringify(buildChatRequest(model, prompt, task)),
+        signal: AbortSignal.timeout(Math.max(5, timeoutSeconds) * 1000),
+      });
+    } catch (error) {
+      if (attempt < MAX_PROBE_ATTEMPTS - 1) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(8000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 350)));
+        continue;
+      }
+      throw error;
+    }
+    const payloadText = await response.text();
+    const payload = (() => {
+      try { return JSON.parse(payloadText); } catch { return {}; }
+    })() as {
+      error?: { message?: string; code?: string; param?: string };
+      choices?: Array<{ finish_reason?: string; message?: { content?: string; refusal?: string | null } }>;
+    };
+    if (!response.ok) {
+      const detail = [
+        payload.error?.message || `HTTP ${response.status}`,
+        payload.error?.code ? `code=${payload.error.code}` : "",
+        payload.error?.param ? `param=${payload.error.param}` : "",
+      ].filter(Boolean).join(" · ");
+      if (transientStatus(response.status) && attempt < MAX_PROBE_ATTEMPTS - 1) {
+        await new Promise(resolve => setTimeout(resolve, retryDelayMs(response, attempt)));
+        continue;
+      }
+      const friendly = friendlyModelApiError(model.model_id, response.status, detail);
+      const retrySummary = transientStatus(response.status) && attempt > 0
+        ? `（已自动指数退避重试 ${attempt} 次，仍未恢复。）`
+        : "";
+      throw new Error(`${friendly}${retrySummary}`);
+    }
+    const content = payload.choices?.[0]?.message?.content || "";
+    if (!content) {
+      const refusal = payload.choices?.[0]?.message?.refusal;
+      throw new Error(refusal ? `模型拒绝测试请求：${refusal}` : "测试响应没有可读取内容。");
+    }
+    if (task === "word") parseColorResponse(content, "Interest");
+    else parseAssociationResponse(content);
+    return attempt;
   }
-  if (task === "word") parseColorResponse(content, "Interest");
-  else parseAssociationResponse(content);
+  throw new Error("运行前验证超过最大重试次数。");
 }
 
 export async function POST(request: Request) {
@@ -58,7 +104,7 @@ export async function POST(request: Request) {
     const model: RequestModel = body.model || {
       model_id: String(body.modelId || ""),
       base_url: String(body.baseUrl || ""),
-      max_tokens: 500,
+      max_tokens: 2048,
       temperature: 1,
       top_p: 1,
       supports_json: true,
@@ -71,14 +117,18 @@ export async function POST(request: Request) {
     }
 
     const settings = body.settings || fallbackSettings;
+    const timeoutSeconds = Math.max(5, Number(settings.timeout_seconds) || 60);
     const colorPrompt = buildColorToEmotionPrompt("J0", "#262626", settings, 1, 0).prompt;
-    await runProbe(apiKey, model, buildWordToColorPrompt("Interest"), "word");
-    await runProbe(apiKey, model, colorPrompt, "color");
+    const wordRetries = await runProbe(apiKey, model, buildWordToColorPrompt("Interest"), "word", timeoutSeconds);
+    const colorRetries = await runProbe(apiKey, model, colorPrompt, "color", timeoutSeconds);
+    const transientRetries = wordRetries + colorRetries;
 
     return Response.json({
       ok: true,
       latencyMs: Date.now() - started,
-      message: "连接、词选色格式和色选情绪格式均验证通过。",
+      message: transientRetries
+        ? `连接和两项格式均验证通过；期间遇到临时服务错误并自动恢复 ${transientRetries} 次。`
+        : "连接、词选色格式和色选情绪格式均验证通过。",
     });
   } catch (error) {
     return Response.json({

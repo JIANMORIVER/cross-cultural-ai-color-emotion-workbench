@@ -1,3 +1,8 @@
+import {
+  reasoningModeForModel,
+  supportsSamplingControls,
+} from "../experiment/model-request";
+
 export type ExportProject = {
   id: string;
   name: string;
@@ -217,6 +222,12 @@ function modelFor(payload: ExportPayload, result: ExportResult) {
     ?? payload.models.find(model => model.alias === result.model_alias);
 }
 
+function exportedSamplingValue(model: ExportModel | undefined, field: "temperature" | "top_p"): ExportCell {
+  if (!model) return "";
+  if (!supportsSamplingControls(model.model_id)) return "未发送（模型默认）";
+  return model[field];
+}
+
 function resultStatus(results: ExportResult[]) {
   return results.every(result => result.validation_status === "Valid") ? "Valid" : "包含无效记录";
 }
@@ -280,8 +291,8 @@ export function buildWordToColorRows(payload: ExportPayload, emotions: readonly 
       "模型别名": model?.alias ?? first.model_alias,
       "回答内容": jsonCell(answers),
       "生成时间": group.map(result => result.created_at).sort().at(-1) ?? "",
-      "温度": model?.temperature ?? "",
-      "Top P": model?.top_p ?? "",
+      "温度": exportedSamplingValue(model, "temperature"),
+      "Top P": exportedSamplingValue(model, "top_p"),
       "最大输出长度": model?.max_tokens ?? "",
       "源请求数": group.length,
       "校验状态": resultStatus(group),
@@ -304,8 +315,8 @@ export function buildColorToEmotionRows(payload: ExportPayload, colors: Readonly
       "颜色HEX": colorMap.get(result.stimulus_id) ?? "",
       "回答内容": jsonCell(sourceResponse(result)),
       "生成时间": result.created_at,
-      "温度": model?.temperature ?? "",
-      "Top P": model?.top_p ?? "",
+      "温度": exportedSamplingValue(model, "temperature"),
+      "Top P": exportedSamplingValue(model, "top_p"),
       "最大输出长度": model?.max_tokens ?? "",
       "校验状态": result.validation_status,
       "重试次数": result.retry_count,
@@ -334,8 +345,8 @@ export function buildColorToEmotionSourceRows(payload: ExportPayload, colors: Re
       "模型": model?.model_id ?? first.model_id,
       "回答内容": jsonCell(answers),
       "生成时间": group.map(result => result.created_at).sort().at(-1) ?? "",
-      "温度": model?.temperature ?? "",
-      "Top P": model?.top_p ?? "",
+      "温度": exportedSamplingValue(model, "temperature"),
+      "Top P": exportedSamplingValue(model, "top_p"),
       "最大输出长度": model?.max_tokens ?? "",
     };
   });
@@ -395,7 +406,9 @@ export function buildSampleManifestRows(payload: ExportPayload): ExportSheetRow[
 }
 
 export function buildExperimentConditionRows(payload: ExportPayload): ExportSheetRow[] {
-  return payload.models.map(model => ({
+  return payload.models.map(model => {
+    const reasoningMode = reasoningModeForModel(model.model_id, model.base_url);
+    return {
     "项目ID": payload.project.id,
     "项目名称": payload.project.name,
     "实验版本": payload.project.experiment_version,
@@ -403,16 +416,21 @@ export function buildExperimentConditionRows(payload: ExportPayload): ExportShee
     "模型": model.model_id,
     "模型别名": model.alias,
     "模型启用": Boolean(model.enabled),
-    "Temperature": model.temperature,
-    "Top P": model.top_p,
+    "Temperature": exportedSamplingValue(model, "temperature"),
+    "Top P": exportedSamplingValue(model, "top_p"),
+    "思考级别": reasoningMode,
     "最大输出长度": model.max_tokens,
     "重复次数": payload.settings.repetitions,
     "并发数": payload.settings.concurrency,
-    "最大重试": payload.settings.max_retry,
+    "最大尝试次数": payload.settings.max_retry,
     "运行中即时重试上限": Math.max(0, payload.settings.max_retry - 1),
     "结束后补齐上限": payload.settings.max_retry > 0 ? 1 : 0,
     "补齐规则": "仅技术失败或未发出的缺失试次；有效结果不重抽",
     "超时(秒)": payload.settings.timeout_seconds,
+    "有效限速/分钟": model.rate_limit,
+    "执行策略": "standard",
+    "退避序列(秒)": "0.7 × 2^attempt（上限 5 秒）+ 0–0.35 秒随机抖动",
+    "连续失败冷却": "无",
     "提示词随机种子": Boolean(payload.settings.prompt_seed_enabled),
     "基础Seed": payload.settings.prompt_seed_base,
     "模型原生Seed": Boolean(payload.settings.native_seed_enabled),
@@ -430,7 +448,8 @@ export function buildExperimentConditionRows(payload: ExportPayload): ExportShee
     "输入形式": "仅文本",
     "上下文": "相互独立",
     "原始响应": Boolean(payload.settings.save_raw),
-  }));
+    };
+  });
 }
 
 export function buildTrialManifestRows(payload: ExportPayload): ExportSheetRow[] {
@@ -477,6 +496,7 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
       { "配置项": "运行中即时重试上限", "值": Math.max(0, payload.settings.max_retry - 1) },
       { "配置项": "结束后补齐上限", "值": payload.settings.max_retry > 0 ? 1 : 0 },
       { "配置项": "超时（秒）", "值": payload.settings.timeout_seconds },
+      { "配置项": "执行队列策略", "值": "所有模型共用统一实时队列、并发、超时与普通重试策略" },
       { "配置项": "提示词随机种子", "值": Boolean(payload.settings.prompt_seed_enabled) },
       { "配置项": "基础 Seed", "值": payload.settings.prompt_seed_base },
       { "配置项": "模型原生 Seed", "值": Boolean(payload.settings.native_seed_enabled) },
@@ -484,8 +504,14 @@ export function buildWorkbookSheets(payload: ExportPayload, emotions: readonly s
     ],
     model_config: payload.models.map(model => ({
       "平台": model.provider, "模型别名": model.alias, "模型": model.model_id,
-      "API 格式": model.api_format, "Base URL": model.base_url, "温度": model.temperature,
-      "Top P": model.top_p, "最大输出长度": model.max_tokens, "限速/分钟": model.rate_limit,
+      "API 格式": model.api_format, "Base URL": model.base_url,
+      "温度": exportedSamplingValue(model, "temperature"),
+      "Top P": exportedSamplingValue(model, "top_p"),
+      "思考级别": reasoningModeForModel(model.model_id, model.base_url),
+      "最大输出长度": model.max_tokens,
+      "配置限速/分钟": model.rate_limit,
+      "有效限速/分钟": model.rate_limit,
+      "执行策略": "standard",
       "启用": Boolean(model.enabled),
     })),
     emotion_list: emotions.map((emotion, index) => ({
