@@ -1,7 +1,9 @@
 "use client";
 
-import { Fragment, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, useContext, useMemo, useRef, useState } from "react";
 import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, runGewCompositeIndicators, runGewPairwise, runGewPatternSimilarity, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
+import { downloadElementPng, downloadPublicationPng } from "./export-png";
+import { FigureExportControls, type FigureExportStyle } from "./FigureExportControls";
 
 type GewMetric = "probability" | "conditional" | "overall";
 type CompositeMetric = "broadness" | "intensity" | "valence";
@@ -17,6 +19,12 @@ type GewCell = {
 };
 
 export type Task2VisualLabProps = { data: GewRow[] | AnalysisResult; fileName?: string; visibleEmotion?: string };
+
+const Task2FigureExportContext = createContext<{
+  safeName: string;
+  style: FigureExportStyle;
+  disabled: boolean;
+} | null>(null);
 
 const METRICS: Record<GewMetric, { label: string; maximum: number }> = {
   probability: { label: "关联概率", maximum: 1 },
@@ -99,18 +107,6 @@ function download(name: string, content: string) {
   const anchor = document.createElement("a");
   anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
 }
-async function downloadPng(element: HTMLElement, name: string) {
-  const width = Math.max(1100, Math.ceil(element.scrollWidth)), height = Math.max(640, Math.ceil(element.scrollHeight));
-  const css = [...document.styleSheets].map(sheet => { try { return [...sheet.cssRules].map(rule => rule.cssText).join("\n"); } catch { return ""; } }).join("\n");
-  const markup = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;min-height:${height}px;background:#f6f7f4;padding:20px;box-sizing:border-box"><style>${css}</style>${element.outerHTML}</div></foreignObject></svg>`;
-  const url = URL.createObjectURL(new Blob([markup], { type: "image/svg+xml;charset=utf-8" })), image = new Image();
-  await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error("图表渲染失败")); image.src = url; });
-  const canvas = document.createElement("canvas"); canvas.width = width * 2; canvas.height = height * 2;
-  const context = canvas.getContext("2d"); if (!context) return;
-  context.scale(2, 2); context.drawImage(image, 0, 0, width, height); URL.revokeObjectURL(url);
-  canvas.toBlob(png => { if (!png) return; const pngUrl = URL.createObjectURL(png), anchor = document.createElement("a"); anchor.href = pngUrl; anchor.download = name; anchor.click(); URL.revokeObjectURL(pngUrl); }, "image/png");
-}
-
 export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }: Task2VisualLabProps) {
   const allCells = useMemo(() => normalizeGew(data), [data]);
   const cells = useMemo(() => visibleEmotion ? allCells.filter(cell => cell.emotion === visibleEmotion) : allCells, [allCells, visibleEmotion]);
@@ -130,6 +126,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const [compositeMetric, setCompositeMetric] = useState<CompositeMetric>("broadness");
   const [profileMetric, setProfileMetric] = useState<GewMetric>("overall"), [differenceA, setDifferenceA] = useState(""), [differenceB, setDifferenceB] = useState("");
   const [differenceMetric, setDifferenceMetric] = useState<GewMetric>("overall");
+  const [exportStyle, setExportStyle] = useState<FigureExportStyle>({ columns: 2, width: 1800, scale: 2, showTitle: true });
   const labRef = useRef<HTMLDivElement>(null);
   const effectiveHeat = sources.includes(heatSource) ? heatSource : (sources[0] || "");
   const effectiveProfileSource = sources.includes(profileSource) ? profileSource : effectiveHeat;
@@ -141,8 +138,9 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
   const effectiveGroupEmotion = visibleEmotions.includes(groupEmotion as typeof GEW_EMOTIONS[number]) ? groupEmotion : (visibleEmotions[0] || "");
   const safeName = fileName.replace(/\.[^.]+$/, "").replace(/\s+/g, "-");
 
-  return <section className="task2-visual-lab visual-lab panel" ref={labRef}>
-    <div className="visual-lab-head"><div><span className="eyebrow">GEW 关系结构精选视图</span><h3>颜色 × 情绪关联画像</h3><p>当前筛选 {cells.length.toLocaleString()} 个统计单元 · {sources.length} 个来源 · {colors.length} 种颜色</p></div><div className="visual-export"><button className="secondary" disabled={!cells.length} onClick={() => download(`${safeName}_gew-visual-data.csv`, toCsv(exportRows(cells)))}>导出描述数据 CSV</button><button className="primary" disabled={!cells.length} onClick={() => labRef.current && void downloadPng(labRef.current, `${safeName}_gew-visual-panel.png`)}>导出面板 PNG</button></div></div>
+  return <Task2FigureExportContext.Provider value={{ safeName, style: exportStyle, disabled: !cells.length }}><section className="task2-visual-lab visual-lab panel python-paper-view" ref={labRef} style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>
+    <div className="visual-lab-head"><div><span className="eyebrow">GEW 关系结构精选视图</span><h3>颜色 × 情绪关联画像</h3><p>当前筛选 {cells.length.toLocaleString()} 个统计单元 · {sources.length} 个来源 · {colors.length} 种颜色</p></div><div className="visual-export"><button className="secondary" disabled={!cells.length} onClick={() => download(`${safeName}_gew-visual-data.csv`, toCsv(exportRows(cells)))}>导出描述数据 CSV</button><button className="primary" disabled={!cells.length} onClick={() => labRef.current && void downloadElementPng(labRef.current, `${safeName}_gew-visual-panel.png`, 1100, 640).catch(error => window.alert(error instanceof Error ? error.message : "PNG 导出失败。"))}>导出面板 PNG</button></div></div>
+    <FigureExportControls value={exportStyle} onChange={setExportStyle} onExport={() => labRef.current && void downloadPublicationPng(labRef.current, `${safeName}_gew-all-views.png`, { minimumWidth: exportStyle.width, scale: exportStyle.scale, showTitle: exportStyle.showTitle, removeSelectors: exportStyle.showTitle ? [".figure-export-controls"] : [".figure-export-controls", ".visual-lab-head", ".gew-view-head"] }).catch(error => window.alert(error instanceof Error ? error.message : "PNG 导出失败。"))} disabled={!cells.length} exportLabel="导出整页总览 PNG" />
     {!cells.length ? <div className="task2-visual-empty"><span>◎</span><b>当前筛选没有可绘制的 GEW 数据</b><small>请保留来源、颜色、情绪、选择与强度字段。</small></div> : <>
       <article className="gew-view-block emphasis">
         <ViewHead index="01" code="8-GROUP RANKING" title="指定颜色×情绪的八组并列比较" note="4个人类组和4个AI组全部保留为独立比较单位；按当前指标从高到低排列，不计算人类/AI合并均值。"><div className="gew-inline-controls"><Select label="颜色" value={effectiveGroupColor} onChange={setGroupColor} options={colors} /><Select label="情绪" value={effectiveGroupEmotion} onChange={setGroupEmotion} options={visibleEmotions} /><MetricSelect value={cohortMetric} onChange={setCohortMetric} /></div></ViewHead>
@@ -181,11 +179,23 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion }:
         {effectiveB ? <GewDifference sourceA={effectiveA} sourceB={effectiveB} metric={differenceMetric} colors={colors} cells={cells} /> : <div className="gew-comparison-empty">至少需要两个来源才能计算来源差值。</div>}
       </article>
     </>}
-  </section>;
+  </section></Task2FigureExportContext.Provider>;
 }
 
 function ViewHead({ index, code, title, note, children }: { index: string; code: string; title: string; note: string; children: React.ReactNode }) {
-  return <div className="gew-view-head"><div><span>{index} / {code}</span><h4>{title}</h4><p>{note}</p></div>{children}</div>;
+  const exportContext = useContext(Task2FigureExportContext);
+  const exportName = title.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-");
+  return <div className="gew-view-head"><div><span>{index} / {code}</span><h4>{title}</h4><p>{note}</p></div><div className="gew-view-actions">{children}{exportContext ? <button className="figure-view-export" disabled={exportContext.disabled} onClick={event => {
+    const figure = event.currentTarget.closest<HTMLElement>(".gew-view-block");
+    if (!figure) return;
+    void downloadPublicationPng(figure, `${exportContext.safeName}_${index}_${exportName}.png`, {
+      minimumWidth: exportContext.style.width,
+      minimumHeight: Math.max(760, Math.round(exportContext.style.width * .62)),
+      scale: exportContext.style.scale,
+      showTitle: exportContext.style.showTitle,
+      removeSelectors: exportContext.style.showTitle ? [] : [".gew-view-head"],
+    }).catch(error => window.alert(error instanceof Error ? error.message : "PNG 导出失败。"));
+  }}>导出此视图 PNG</button> : null}</div></div>;
 }
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: string[] }) {
   return <label>{label}<select value={value} onChange={event => onChange(event.target.value)}>{options.map(option => <option key={option}>{option}</option>)}</select></label>;

@@ -57,6 +57,13 @@
       "when": 1785047041573,
       "tag": "0007_wandering_vivisector",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1785469172335,
+      "tag": "0008_lean_proudstar",
+      "breakpoints": true
     }
   ]
 }

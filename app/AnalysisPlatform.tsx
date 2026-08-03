@@ -2,6 +2,8 @@
 
 import { useMemo, useRef, useState } from "react";
 import { BidirectionalVisualLab } from "./analysis/BidirectionalVisualLab";
+import { elementToPngBlob } from "./analysis/export-png";
+import { buildInteractiveHtmlReport } from "./analysis/html-report";
 import { Task1VisualLab } from "./analysis/Task1VisualLab";
 import { Task2VisualLab } from "./analysis/Task2VisualLab";
 import {
@@ -114,10 +116,10 @@ const TASKS = [
 ] as const;
 
 function download(name: string, content: string, type = "text/csv;charset=utf-8") {
-  const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
+  const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.style.display = "none"; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function downloadBlob(name: string, blob: Blob) {
-  const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
+  const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.style.display = "none"; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function resultFromRows(id: string, title: string, rows: ExportRow[], summary: AnalysisResult["summary"], note?: string): AnalysisResult {
@@ -295,6 +297,7 @@ export function AnalysisPlatform() {
   const [sourceFilter, setSourceFilter] = useState("全部来源");
   const [emotionFilter, setEmotionFilter] = useState("全部情绪");
   const [colorFilter, setColorFilter] = useState("全部颜色");
+  const [publicationExporting, setPublicationExporting] = useState(false);
 
   const activeGroup = groups.find(group => group.id === activeGroupId) || groups[0];
   const sheet = activeGroup?.sheets.find(item => item.name === activeGroup.sheetName);
@@ -556,40 +559,45 @@ export function AnalysisPlatform() {
     }
   }
 
+  function calculateTask(id: string): AnalysisResult {
+    let result: AnalysisResult;
+    if (id === "task1-normalize") {
+      const mismatches = colorData.rows.filter(row => row.consistencyDeltaE !== null && row.consistencyDeltaE > 2.3).length;
+      const inputFormats = [...new Set(colorData.rows.map(row => row.inputFormat))];
+      result = resultFromRows(id, "色彩格式标准化", colorRowsToExport(colorData.rows), [{ label: "有效色彩", value: String(colorData.rows.length) }, { label: "拒绝值", value: String(colorData.rejected) }, { label: "多格式不一致", value: String(mismatches) }, { label: "权威输入格式", value: inputFormats.join(" + ") || "—" }], "历史宽表以 HSL 为权威输入：HSL → 浮点 sRGB(D65) → CIELAB/HSV；HEX 只做一致性核验。长表按 HSL、RGB、HEX、HSV、Lab 的可用性选择单一权威路径。ΔE76 > 2.3 的多格式记录会被标记，但不会静默删除。");
+    }
+    else if (id === "task1-summary") result = runColorSummary(colorData.rows, colorData.rejected);
+    else if (id === "task1-hsv") result = runHsvDistribution(colorData.rows);
+    else if (id === "task1-cluster") result = runColorClustering(colorData.rows);
+    else if (id === "task1-within-delta") result = runWithinGroupDelta(colorData.rows);
+    else if (id === "task1-delta") result = runDeltaE(colorData.rows);
+    else if (id === "task1-bias") result = runCulturalBias(colorData.rows);
+    else if (id === "task1-diversity") result = runColorDiversity(colorData.rows);
+    else if (id === "task1-hue-jsd") result = runHueDistributionDistance(colorData.rows);
+    else if (id === "task1-human-ai") result = runHumanAiColorAlignment(colorData.rows);
+    else if (id === "task1-cohort-test") result = runHumanAiColorCohortTest(colorData.rows);
+    else if (id === "task2-qc") result = runGewQc(gewData);
+    else if (id === "task2-descriptive") result = runGewDescriptive(gewData.rows);
+    else if (id === "task2-omnibus") result = runGewOmnibus(gewData.rows);
+    else if (id === "task2-pairwise") result = runGewPairwise(gewData.rows);
+    else if (id === "task2-jsd") result = runGewJsd(gewData.rows);
+    else if (id === "task2-valence") result = runGewValenceProfile(gewData.rows);
+    else if (id === "task2-concentration") result = runGewConcentration(gewData.rows);
+    else if (id === "task2-indicators") result = runGewCompositeIndicators(gewData.rows);
+    else if (id === "task2-pattern") result = runGewPatternSimilarity(gewData.rows);
+    else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
+    else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
+    else if (id === "task-cross-groups") result = runBidirectionalGroupComparison(bidirectionalData.rows);
+    else result = bidirectionalData;
+    if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
+    return result;
+  }
+
   async function runTask(id: string) {
     setRuns(current => ({ ...current, [id]: { status: "running" } }));
     await new Promise(resolve => window.setTimeout(resolve, 80));
     try {
-      let result: AnalysisResult;
-      if (id === "task1-normalize") {
-        const mismatches = colorData.rows.filter(row => row.consistencyDeltaE !== null && row.consistencyDeltaE > 2.3).length;
-        const inputFormats = [...new Set(colorData.rows.map(row => row.inputFormat))];
-        result = resultFromRows(id, "色彩格式标准化", colorRowsToExport(colorData.rows), [{ label: "有效色彩", value: String(colorData.rows.length) }, { label: "拒绝值", value: String(colorData.rejected) }, { label: "多格式不一致", value: String(mismatches) }, { label: "权威输入格式", value: inputFormats.join(" + ") || "—" }], "历史宽表以 HSL 为权威输入：HSL → 浮点 sRGB(D65) → CIELAB/HSV；HEX 只做一致性核验。长表按 HSL、RGB、HEX、HSV、Lab 的可用性选择单一权威路径。ΔE76 > 2.3 的多格式记录会被标记，但不会静默删除。");
-      }
-      else if (id === "task1-summary") result = runColorSummary(colorData.rows, colorData.rejected);
-      else if (id === "task1-hsv") result = runHsvDistribution(colorData.rows);
-      else if (id === "task1-cluster") result = runColorClustering(colorData.rows);
-      else if (id === "task1-within-delta") result = runWithinGroupDelta(colorData.rows);
-      else if (id === "task1-delta") result = runDeltaE(colorData.rows);
-      else if (id === "task1-bias") result = runCulturalBias(colorData.rows);
-      else if (id === "task1-diversity") result = runColorDiversity(colorData.rows);
-      else if (id === "task1-hue-jsd") result = runHueDistributionDistance(colorData.rows);
-      else if (id === "task1-human-ai") result = runHumanAiColorAlignment(colorData.rows);
-      else if (id === "task1-cohort-test") result = runHumanAiColorCohortTest(colorData.rows);
-      else if (id === "task2-qc") result = runGewQc(gewData);
-      else if (id === "task2-descriptive") result = runGewDescriptive(gewData.rows);
-      else if (id === "task2-omnibus") result = runGewOmnibus(gewData.rows);
-      else if (id === "task2-pairwise") result = runGewPairwise(gewData.rows);
-      else if (id === "task2-jsd") result = runGewJsd(gewData.rows);
-      else if (id === "task2-valence") result = runGewValenceProfile(gewData.rows);
-      else if (id === "task2-concentration") result = runGewConcentration(gewData.rows);
-      else if (id === "task2-indicators") result = runGewCompositeIndicators(gewData.rows);
-      else if (id === "task2-pattern") result = runGewPatternSimilarity(gewData.rows);
-      else if (id === "task2-human-ai") result = runHumanAiGewAlignment(gewData.rows);
-      else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
-      else if (id === "task-cross-groups") result = runBidirectionalGroupComparison(bidirectionalData.rows);
-      else result = bidirectionalData;
-      if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
+      const result = calculateTask(id);
       setRuns(current => ({ ...current, [id]: { status: "completed", result } }));
     } catch (error) { setRuns(current => ({ ...current, [id]: { status: "error", error: error instanceof Error ? error.message : "分析失败" } })); }
   }
@@ -609,6 +617,27 @@ export function AnalysisPlatform() {
     if (id === "task-cross-groups") return new Set(bidirectionalData.rows.map(row => row["来源"])).size >= 2;
     if (id === "task-cross-bidirectional") return bidirectionalData.rows.length > 0;
     return id.startsWith("task1") ? task1 : task2;
+  }
+
+  function taskUnavailableReason(id: string) {
+    const task1 = colorData.rows.length > 0;
+    const task2 = gewData.rows.length > 0;
+    const colorSources = new Set(colorData.rows.map(row => row.source)).size;
+    const gewSources = new Set(gewData.rows.map(row => row.source)).size;
+    if (id.startsWith("task1") && !task1) return "当前范围没有有效的实验一词选色色彩数据。";
+    if (id.startsWith("task2") && !task2) return "当前范围没有有效的实验二情绪轮数据。";
+    if (["task1-delta", "task1-hue-jsd"].includes(id) && colorSources < 2) return "至少需要 2 个实验一来源。";
+    if (id === "task1-bias" && colorSources < 3) return "至少需要 3 个实验一来源。";
+    if (id === "task1-human-ai" && !colorData.rows.some(row => row.cohort === "human")) return "至少需要 1 个人类实验一来源。";
+    if (id === "task1-human-ai" && !colorData.rows.some(row => row.cohort === "ai")) return "至少需要 1 个 AI 实验一来源。";
+    if (id === "task1-cohort-test") return "至少需要 2 个人类来源和 2 个 AI 来源。";
+    if (["task2-omnibus", "task2-pairwise", "task2-jsd", "task2-pattern"].includes(id) && gewSources < 2) return "至少需要 2 个实验二来源。";
+    if (id === "task2-human-ai" && !gewData.rows.some(row => row.cohort === "human")) return "至少需要 1 个人类实验二来源。";
+    if (id === "task2-human-ai" && !gewData.rows.some(row => row.cohort === "ai")) return "至少需要 1 个 AI 实验二来源。";
+    if (id === "task2-cohort-test") return "至少需要 2 个人类来源和 2 个 AI 来源。";
+    if (id === "task-cross-groups") return "至少需要 2 个可完成双向匹配的来源。";
+    if (id === "task-cross-bidirectional") return "当前范围没有可完成双向匹配的数据。";
+    return "当前数据不满足该分析的运行条件。";
   }
 
   function exportResult(result: AnalysisResult) { download(`${fileName.replace(/\.[^.]+$/, "") || "analysis"}_${result.id}.csv`, toCsv(result.rows)); }
@@ -638,6 +667,186 @@ export function AnalysisPlatform() {
     });
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(manifest), "analysis_manifest");
     XLSX.writeFile(workbook, `${safeFileName(fileName)}_全部分析结果.xlsx`, { compression: true });
+  }
+
+  async function exportInteractiveReport() {
+    if (!analysisGroups.length) return;
+    const availableTasks = TASKS.filter(task => taskAvailable(task.id));
+    const completed: AnalysisResult[] = [];
+    const failures = new Map<string, string>();
+    const nextRuns: Record<string, TaskRun> = {};
+    setConfigNotice(`正在计算 ${availableTasks.length} 项适用分析并生成完整交互报告…`);
+    for (const task of availableTasks) {
+      setRuns(current => ({ ...current, [task.id]: { status: "running" } }));
+      await new Promise(resolve => window.setTimeout(resolve, 0));
+      try {
+        const result = calculateTask(task.id);
+        completed.push(result);
+        nextRuns[task.id] = { status: "completed", result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "分析失败";
+        failures.set(task.id, message);
+        nextRuns[task.id] = { status: "error", error: message };
+      }
+    }
+    setRuns(current => ({ ...current, ...nextRuns }));
+    const generatedAt = new Date().toISOString();
+    const html = buildInteractiveHtmlReport({
+      title: `${fileName || "Chromalab"} · 交互式数据报告`,
+      generatedAt,
+      scopeLabel: analysisScope === "combined" ? "合并已启用实验组" : activeGroup?.label || "当前实验组",
+      schemaLabel: detection.schemaLabel,
+      groups: analysisGroups.map(group => ({
+        label: group.label,
+        cohort: group.cohort,
+        fileName: group.fileName,
+        sheetName: group.sheetName,
+        rowCount: configuredRows(group).length,
+      })),
+      methods: TASKS.map(task => {
+        const result = completed.find(item => item.id === task.id);
+        const failure = failures.get(task.id);
+        return {
+          ...task,
+          status: result ? "included" as const : failure ? "error" as const : "not-applicable" as const,
+          resultRows: result?.rows.length || 0,
+          reason: failure || (!taskAvailable(task.id) ? taskUnavailableReason(task.id) : undefined),
+        };
+      }),
+      colors: colorData.rows,
+      gew: gewDescription,
+      bidirectional: bidirectionalData.rows,
+      results: completed,
+      initialFilters: {
+        source: sourceFilter,
+        emotion: emotionFilter,
+        color: colorFilter,
+      },
+    });
+    download(`${safeFileName(fileName || "chromalab")}_交互式数据报告.html`, html, "text/html;charset=utf-8");
+    setConfigNotice(failures.size
+      ? `完整交互报告已导出：纳入 ${completed.length} 项分析，${failures.size} 项计算失败并已在目录注明。`
+      : `完整交互报告已导出：当前数据适用的 ${completed.length} 项分析已全部纳入。`);
+  }
+
+  async function exportPublicationFigures() {
+    if (!analysisGroups.length || publicationExporting) return;
+    setPublicationExporting(true);
+    setConfigNotice("正在准备论文标准图表，请保持当前页面开启…");
+
+    const waitForPaint = () => new Promise<void>(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
+    const files: Record<string, Uint8Array> = {};
+    const manifest: ExportRow[] = [];
+    const counters = { A: 0, B: 0, C: 0 };
+    let completed = 0;
+    let failed = 0;
+    let firstCaptureError = "";
+
+    try {
+      await waitForPaint();
+      const stage = document.getElementById("publication-export-stage");
+      if (!stage) throw new Error("图表导出区未能完成加载，请重试。");
+
+      const capture = async (group: keyof typeof counters, module: string, title: string, element?: HTMLElement | null) => {
+        counters[group] += 1;
+        const figureId = `${group}${String(counters[group]).padStart(2, "0")}`;
+        const file = `${group === "A" ? "实验一_词选色" : group === "B" ? "实验二_情绪轮" : "双向整合"}/${figureId}_${safeFileName(title)}.png`;
+        if (!element) {
+          failed += 1;
+          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "未生成", 文件: "", 说明: "当前数据没有对应的可绘制结果。" });
+          return;
+        }
+        try {
+          const blob = await elementToPngBlob(element, {
+            minimumWidth: 1_200,
+            minimumHeight: 720,
+            background: "#ffffff",
+            publicationMode: true,
+          });
+          files[`figures/${file}`] = new Uint8Array(await blob.arrayBuffer());
+          completed += 1;
+          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "已生成", 文件: `figures/${file}`, 说明: "白底高分辨率 PNG；交互控件已冻结为当前参数。" });
+          setConfigNotice(`正在生成论文图表：已完成 ${completed} 张 · ${figureId} ${title}`);
+        } catch (error) {
+          failed += 1;
+          const message = error instanceof Error ? error.message : "未知错误";
+          if (!firstCaptureError) firstCaptureError = `${figureId} ${title}：${message}`;
+          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "生成失败", 文件: "", 说明: message });
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 0));
+      };
+
+      const task1Root = stage.querySelector<HTMLElement>('[data-publication-group="task1"]');
+      const task1Select = task1Root?.querySelector<HTMLSelectElement>(".visual-lab-controls select");
+      if (task1Root && task1Select) {
+        const charts = Array.from(task1Select.options).map(option => ({ value: option.value, label: option.text }));
+        for (const chart of charts) {
+          const select = task1Root.querySelector<HTMLSelectElement>(".visual-lab-controls select");
+          if (!select) continue;
+          select.value = chart.value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          await waitForPaint();
+          await capture("A", "实验一 · 词选色", chart.label, task1Root.querySelector<HTMLElement>(".visual-stage"));
+        }
+      }
+
+      const task2Root = stage.querySelector<HTMLElement>('[data-publication-group="task2"]');
+      if (task2Root) {
+        const blocks = Array.from(task2Root.querySelectorAll<HTMLElement>(".gew-view-block"));
+        for (const block of blocks) {
+          const title = block.querySelector("h4")?.textContent?.trim() || "实验二分析图";
+          await capture("B", "实验二 · 情绪轮", title, block);
+        }
+        const dotsButton = Array.from(task2Root.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.includes("气泡点阵"));
+        if (dotsButton) {
+          dotsButton.click();
+          await waitForPaint();
+          const dotBlock = Array.from(task2Root.querySelectorAll<HTMLElement>(".gew-view-block")).find(block => block.querySelector("h4")?.textContent?.includes("气泡点阵"));
+          await capture("B", "实验二 · 情绪轮", "各来源颜色—情绪气泡点阵", dotBlock);
+        }
+      }
+
+      const bidirectionalRoot = stage.querySelector<HTMLElement>('[data-publication-group="bidirectional"]');
+      if (bidirectionalRoot) {
+        const views = Array.from(bidirectionalRoot.querySelectorAll<HTMLButtonElement>(".visual-tabs button")).map(button => button.textContent?.trim() || "双向分析图");
+        for (const title of views) {
+          const button = Array.from(bidirectionalRoot.querySelectorAll<HTMLButtonElement>(".visual-tabs button")).find(item => item.textContent?.trim() === title);
+          button?.click();
+          await waitForPaint();
+          await capture("C", "双向整合", title, bidirectionalRoot.querySelector<HTMLElement>(".bidirectional-canvas"));
+        }
+      }
+
+      if (!completed) throw new Error(firstCaptureError ? `所有图表生成失败；首个错误为 ${firstCaptureError}` : "当前范围没有可导出的分析图表。");
+      const { zipSync, strToU8 } = await import("fflate");
+      files["图表目录.csv"] = strToU8(toCsv(manifest));
+      files["README_论文插图说明.txt"] = strToU8([
+        "Chromalab 论文标准图表归档",
+        `生成时间：${new Date().toISOString()}`,
+        `分析范围：${analysisScope === "combined" ? "合并已启用实验组" : activeGroup?.label || "当前实验组"}`,
+        `实验组：${analysisGroups.map(group => `${group.label}(${group.cohort})`).join("、")}`,
+        `成功图表：${completed} 张`,
+        `未生成或失败：${failed} 张`,
+        "",
+        "输出规范",
+        "- 单图独立 PNG，白色背景，至少 1200 px 版心并以 2× 像素密度渲染（受浏览器最大画布限制时自动安全缩放）。",
+        "- 图中交互下拉框已转换为静态参数标签；不包含网页按钮、API Key 或模型访问凭证。",
+        "- A/B/C 分别代表实验一、实验二和双向整合；图号可直接用于论文图注与补充材料索引。",
+        "- 参数化图表采用当前分析范围的默认来源、颜色、情绪或指标；具体值显示在图中或图表目录中。",
+        "- PNG 本身按像素保存；排版时可在 Word、LaTeX 或期刊系统中按目标尺寸设为 300 dpi。",
+        "",
+        "请结合图表目录.csv核对图号、标题、生成状态和文件位置。",
+      ].join("\n"));
+      downloadBlob(
+        `${safeFileName(fileName || "chromalab")}_全部论文图表PNG.zip`,
+        new Blob([zipSync(files, { level: 1 })], { type: "application/zip" }),
+      );
+      setConfigNotice(`论文图表归档已导出：${completed} 张 PNG${failed ? `，另有 ${failed} 张未生成并已写入目录` : "，全部成功"}。`);
+    } catch (error) {
+      setConfigNotice(error instanceof Error ? `论文图表导出失败：${error.message}` : "论文图表导出失败。");
+    } finally {
+      setPublicationExporting(false);
+    }
   }
 
   async function exportArchive() {
@@ -790,7 +999,7 @@ export function AnalysisPlatform() {
         <section className="analysis-config-toolbar panel">
           <input ref={configInputRef} type="file" accept=".json,application/json" onChange={event => { void importConfig(event.target.files?.[0]); event.currentTarget.value = ""; }} />
           <div><span className="eyebrow">可复现实验设置</span><h3>分析配置一键迁移</h3><p>保存工作表、行列范围、组类型、启用状态和清洗记录；配置不包含原始数据或 API Key。</p></div>
-          <div className="config-actions"><button className="secondary" onClick={() => configInputRef.current?.click()}>导入配置 JSON</button><button className="secondary" disabled={!groups.length} onClick={exportConfig}>导出配置 JSON</button><button className="primary" disabled={!analysisGroups.length} onClick={() => void exportArchive()}>一键导出归档 ZIP ↓</button></div>
+          <div className="config-actions"><button className="secondary" onClick={() => configInputRef.current?.click()}>导入配置 JSON</button><button className="secondary" disabled={!groups.length} onClick={exportConfig}>导出配置 JSON</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互式 HTML ↓</button><button className="secondary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成图表…" : "一键导出全部图表 PNG.zip ↓"}</button><button className="primary" disabled={!analysisGroups.length} onClick={() => void exportArchive()}>一键导出归档 ZIP ↓</button></div>
         </section>
         {configNotice ? <div className="analysis-alert info"><b>配置 / 清洗记录</b><span>{configNotice}</span></div> : null}
 
@@ -848,7 +1057,7 @@ export function AnalysisPlatform() {
     </section> : null}
 
     {tab === "tasks" ? <section className="analysis-task-workspace">
-      <div className="analysis-status-strip batch"><div><span className="eyebrow">当前分析范围</span><b>{analysisScope === "combined" ? `${analysisGroups.length} 组实验合并比较` : activeGroup?.label || "尚未选择实验组"}</b><small>{detection.schemaLabel} · {selectedRows.length} 行 × {selectedColumns.length} 列</small></div><div><strong>{analysisGroups.length}</strong><span>个实验组</span></div><div><strong>{selectedTaskCount}</strong><span>项可运行</span></div><div><strong>{completeCount}</strong><span>项已完成</span></div><div className="analysis-batch-actions"><button className="secondary" onClick={() => setTab("import")}>调整数据范围</button><button className="primary" disabled={!selectedTaskCount || Object.values(runs).some(run => run.status === "running")} onClick={() => void Promise.all(TASKS.filter(task => taskAvailable(task.id)).map(task => runTask(task.id)))}>运行全部可用分析</button><button className="secondary" disabled={!completeCount} onClick={() => void exportAllResults()}>导出全部结果 XLSX ↓</button><button className="secondary archive" disabled={!analysisGroups.length} onClick={() => void exportArchive()}>一键导出归档 ZIP ↓</button></div></div>
+      <div className="analysis-status-strip batch"><div><span className="eyebrow">当前分析范围</span><b>{analysisScope === "combined" ? `${analysisGroups.length} 组实验合并比较` : activeGroup?.label || "尚未选择实验组"}</b><small>{detection.schemaLabel} · {selectedRows.length} 行 × {selectedColumns.length} 列</small></div><div><strong>{analysisGroups.length}</strong><span>个实验组</span></div><div><strong>{selectedTaskCount}</strong><span>项可运行</span></div><div><strong>{completeCount}</strong><span>项已完成</span></div><div className="analysis-batch-actions"><button className="secondary" onClick={() => setTab("import")}>调整数据范围</button><button className="primary" disabled={!selectedTaskCount || Object.values(runs).some(run => run.status === "running")} onClick={() => void Promise.all(TASKS.filter(task => taskAvailable(task.id)).map(task => runTask(task.id)))}>运行全部可用分析</button><button className="secondary" disabled={!completeCount} onClick={() => void exportAllResults()}>导出全部结果 XLSX ↓</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互 HTML ↓</button><button className="secondary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成图表…" : "全部论文图表 PNG.zip ↓"}</button><button className="secondary archive" disabled={!analysisGroups.length} onClick={() => void exportArchive()}>一键导出归档 ZIP ↓</button></div></div>
       <section className="color-pipeline-audit panel">
         <div className="pipeline-title"><span className="eyebrow">词选色 · 色彩格式链路审计</span><h2>分析 1–7 使用固定、可追溯的转换路径</h2><p>已按历史 Bias_OriginalData.py 与 hsvplot.py 对齐，避免把 HSL 的 L 与 CIELAB 的 L* 混用。</p></div>
         <div className="pipeline-flow"><div><span>原始宽表</span><b>HSL 为权威</b><small>H 0–360 · S/L 0–100<br />HEX 仅核验</small></div><i>→</i><div><span>统一底层</span><b>浮点 sRGB</b><small>D65 白点<br />Lab 前不舍入</small></div><i>→</i><div><span>图形分析</span><b>HSV</b><small>H–S / V–S<br />H° · S/V 0–1</small></div><i>+</i><div><span>统计分析</span><b>CIELAB</b><small>K-means / ΔE / 偏置<br />D65 · CIE76</small></div></div>
@@ -877,7 +1086,7 @@ export function AnalysisPlatform() {
     </section> : null}
 
     {tab === "dashboard" ? <section className="analysis-dashboard">
-      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><button className="secondary" disabled={dashboardMode === "task1" ? !dashboardColors.length : dashboardMode === "task2" ? !dashboardGew.length : !dashboardBidirectional.length} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" ? colorRowsToExport(dashboardColors) : dashboardMode === "task2" ? dashboardGew : dashboardBidirectional) as ExportRow[]))}>导出当前视图 ↓</button></div>
+      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><div className="dashboard-export-actions"><button className="secondary" disabled={dashboardMode === "task1" ? !dashboardColors.length : dashboardMode === "task2" ? !dashboardGew.length : !dashboardBidirectional.length} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" ? colorRowsToExport(dashboardColors) : dashboardMode === "task2" ? dashboardGew : dashboardBidirectional) as ExportRow[]))}>导出当前视图 CSV ↓</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互式 HTML ↓</button><button className="primary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成…" : "一键导出全部论文图表 ↓"}</button></div></div>
       <div className="dashboard-toolbar panel">
         <div className="dashboard-mode"><button className={dashboardMode === "task1" ? "active" : ""} onClick={() => resetDashboardFilters("task1")}>实验一 · 词选色</button><button className={dashboardMode === "task2" ? "active" : ""} onClick={() => resetDashboardFilters("task2")}>实验二 · 情绪轮</button><button className={dashboardMode === "bidirectional" ? "active" : ""} onClick={() => resetDashboardFilters("bidirectional")}>双向整合 · 探索</button></div>
         <label>来源<select value={sources.includes(sourceFilter) ? sourceFilter : "全部来源"} onChange={event => setSourceFilter(event.target.value)}><option>全部来源</option>{sources.map(value => <option key={value}>{value}</option>)}</select></label>
@@ -891,6 +1100,11 @@ export function AnalysisPlatform() {
           ? <Task2Dashboard rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} />
           : <BidirectionalVisualLab rows={dashboardBidirectional} />}
     </section> : null}
+    {publicationExporting ? <div className="publication-export-stage" id="publication-export-stage" aria-hidden="true">
+      {colorData.rows.length ? <div data-publication-group="task1"><Task1VisualLab rows={colorData.rows} fileName={fileName} /></div> : null}
+      {gewData.rows.length ? <div data-publication-group="task2"><Task2VisualLab data={gewData.rows} fileName={fileName} /></div> : null}
+      {bidirectionalData.rows.length ? <div data-publication-group="bidirectional"><BidirectionalVisualLab rows={bidirectionalData.rows} /></div> : null}
+    </div> : null}
   </>;
 }
 

@@ -59,6 +59,9 @@ async function ensureSchema() {
       max_retry_count INTEGER NOT NULL, created_at TEXT NOT NULL,
       repair_attempted_at TEXT, completed_at TEXT
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS app_migrations (
+      id TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+    )`),
     db.prepare("CREATE INDEX IF NOT EXISTS trial_project_idx ON trial_results(project_id, task_type)"),
     db.prepare("CREATE INDEX IF NOT EXISTS attempt_project_idx ON trial_attempts(project_id, model_id, run_index)"),
     db.prepare("CREATE INDEX IF NOT EXISTS manifest_project_idx ON trial_manifest(project_id, model_id, run_index)"),
@@ -94,13 +97,96 @@ async function ensureSchema() {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(PROJECT_ID, 100, 1, 1, 2, 3, 60, 1, 0, 20260715, 0, 0, "all", "model-gpt", '["model-gpt"]', 1, 1, 1),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-5.6", "https://api.openai.com/v1", "OpenAI Chat Completions", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
+        .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-5.6", "https://api.openai.com/v1", "OpenAI Chat Completions", 2048, 1, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-deepseek", PROJECT_ID, "DeepSeek", "DeepSeek", "deepseek-chat", "https://api.deepseek.com/v1", "OpenAI-compatible", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
+        .bind("model-deepseek", PROJECT_ID, "DeepSeek", "DeepSeek", "deepseek-v4-pro", "https://api.deepseek.com", "OpenAI-compatible", 2048, 1, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-doubao", PROJECT_ID, "ByteDance", "Doubao", "doubao-seed-1-6", "https://ark.cn-beijing.volces.com/api/v3", "OpenAI-compatible", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
+        .bind("model-doubao", PROJECT_ID, "ByteDance", "Doubao", "doubao-seed-2-1-pro-260628", "https://ark.cn-beijing.volces.com/api/v3", "OpenAI-compatible", 2048, 1, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-gemini", PROJECT_ID, "Google", "Gemini", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai", "OpenAI-compatible", 500, 0.8, 1, 0, 1, 60, 1, "Not tested", null),
+        .bind("model-gemini", PROJECT_ID, "Google", "Gemini", "gemini-3.1-pro-preview", "https://generativelanguage.googleapis.com/v1beta/openai", "OpenAI-compatible", 2048, 1, 1, 0, 1, 8, 1, "Not tested", null),
+    ]);
+  }
+  await db.prepare(`UPDATE model_configs
+    SET model_id = 'gemini-3.6-flash', last_test_status = 'Not tested', latency_ms = NULL
+    WHERE id = 'model-gemini'
+      AND model_id IN ('gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-flash-latest')`).run();
+  await db.prepare(`UPDATE model_configs
+    SET model_id = 'gemini-3.1-pro-preview', last_test_status = 'Not tested', latency_ms = NULL
+    WHERE id = 'model-gemini'
+      AND model_id IN ('gemini-2.5-pro', 'gemini-pro-latest')`).run();
+  await db.prepare(`UPDATE model_configs
+    SET max_tokens = 2048
+    WHERE id = 'model-gemini'
+      AND model_id = 'gemini-3.1-pro-preview'
+      AND max_tokens < 2048`).run();
+
+  const protocolMigrationId = "model-protocol-t1-p1-2048-low-reasoning-v1";
+  const protocolMigrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")
+    .bind(protocolMigrationId).first();
+  if (!protocolMigrated) {
+    await db.batch([
+      db.prepare(`UPDATE model_configs
+        SET temperature = 1, top_p = 1, max_tokens = 2048
+        WHERE project_id = ?`).bind(PROJECT_ID),
+      db.prepare(`UPDATE model_configs
+        SET model_id = 'deepseek-v4-pro', base_url = 'https://api.deepseek.com',
+            last_test_status = 'Not tested', latency_ms = NULL
+        WHERE id = 'model-deepseek' AND model_id = 'deepseek-chat'`),
+      db.prepare(`UPDATE model_configs
+        SET model_id = 'doubao-seed-2-0-pro-260215',
+            last_test_status = 'Not tested', latency_ms = NULL
+        WHERE id = 'model-doubao' AND model_id = 'doubao-seed-1-6'`),
+      db.prepare(`INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)`)
+        .bind(protocolMigrationId, new Date().toISOString()),
+    ]);
+  }
+
+  const geminiProtocolMigrationId = "gemini-pro-t1-p1-low-reasoning-v1";
+  const geminiProtocolMigrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")
+    .bind(geminiProtocolMigrationId).first();
+  if (!geminiProtocolMigrated) {
+    await db.batch([
+      db.prepare(`UPDATE model_configs
+        SET model_id = 'gemini-3.1-pro-preview', temperature = 1, top_p = 1,
+            max_tokens = 2048, last_test_status = 'Not tested', latency_ms = NULL
+        WHERE id = 'model-gemini'`),
+      db.prepare(`INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)`)
+        .bind(geminiProtocolMigrationId, new Date().toISOString()),
+    ]);
+  }
+
+  const geminiStableQueueMigrationId = "gemini-stable-queue-v1";
+  const geminiStableQueueMigrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")
+    .bind(geminiStableQueueMigrationId).first();
+  if (!geminiStableQueueMigrated) {
+    await db.batch([
+      db.prepare(`UPDATE model_configs
+        SET rate_limit = 8
+        WHERE id = 'model-gemini'`),
+      db.prepare(`INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)`)
+        .bind(geminiStableQueueMigrationId, new Date().toISOString()),
+    ]);
+  }
+
+  const doubao21MigrationId = "doubao-seed-2-1-pro-260628-v1";
+  const doubao21Migrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")
+    .bind(doubao21MigrationId).first();
+  if (!doubao21Migrated) {
+    await db.batch([
+      db.prepare(`UPDATE model_configs
+        SET model_id = 'doubao-seed-2-1-pro-260628',
+            base_url = 'https://ark.cn-beijing.volces.com/api/v3',
+            temperature = 1, top_p = 1, max_tokens = 2048,
+            last_test_status = 'Not tested', latency_ms = NULL
+        WHERE id = 'model-doubao'
+          AND model_id IN (
+            'doubao-seed-1-6',
+            'doubao-seed-2-0-pro-260215',
+            'seedance2.1pro',
+            'doubao-seedance-2.1-pro'
+          )`),
+      db.prepare(`INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)`)
+        .bind(doubao21MigrationId, new Date().toISOString()),
     ]);
   }
 }
@@ -140,7 +226,8 @@ export async function GET() {
             AND a.status != 'success') AS failed_attempt_count,
         COALESCE(
           (SELECT MIN(created_at) FROM trial_attempts a WHERE a.project_id = ? AND a.model_id = g.model_id AND a.run_index = g.run_index),
-          (SELECT MIN(created_at) FROM trial_results r WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index)
+          (SELECT MIN(created_at) FROM trial_results r WHERE r.project_id = ? AND r.model_id = g.model_id AND r.run_index = g.run_index),
+          (SELECT MIN(created_at) FROM trial_manifest m WHERE m.project_id = ? AND m.model_id = g.model_id AND m.run_index = g.run_index)
         ) AS started_at,
         COALESCE(
           (SELECT MAX(created_at) FROM trial_attempts a WHERE a.project_id = ? AND a.model_id = g.model_id AND a.run_index = g.run_index),
@@ -149,7 +236,7 @@ export async function GET() {
       FROM run_groups g
       ORDER BY g.model_alias, g.run_index`)
       .bind(PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID,
-        PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID).all(),
+        PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID, PROJECT_ID).all(),
     db.prepare(`SELECT COALESCE(MAX(run_index), 0) + 1 AS next_run_index FROM (
       SELECT run_index FROM trial_results
       WHERE project_id = ? AND run_index > 0 AND trial_id NOT LIKE 'pilot-%'
