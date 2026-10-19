@@ -16,12 +16,16 @@
 
 旧版生成的全零 `task2_heterogeneity_result.json.gz` 不能修复，必须用本包和原始八份 Excel 重新运行。
 
+新结果的 `input_summary.json` 顶部必须包含 `parserVersion`；如果没有这个字段，说明运行的是其他旧目录中的脚本，不要导入或继续正式分析。
+
 ## 第一次安装
 
-1. 将 ZIP 完整解压到英文短路径，例如 `D:\Chromalab3006Task2`。
+1. 将 ZIP 中的 `C3006V2` 文件夹直接解压到磁盘根目录，例如 `E:\C3006V2`。不要放在“下载”目录，也不要形成 `C3006V2\C3006V2` 双层目录，否则 scikit-learn 的 DLL 可能触发 Windows 路径过长错误。
 2. 安装 64 位 Python 3.11 和 Node.js 22 LTS。
 3. 双击 `1_install_windows.bat`。
 4. 安装完成后双击 `3_check_environment.bat` 检查环境。
+
+如果曾在长路径中运行过安装脚本，不要把原来的 `.venv` 搬过来；在 `E:\C3006V2` 中重新运行 `1_install_windows.bat` 创建新的虚拟环境。
 
 如果 pip 报代理错误，先在 Windows“代理设置”中关闭无效代理，或在 CMD 执行：
 
@@ -52,7 +56,17 @@ set PIP_PROXY=
 
 ## 推荐运行顺序
 
-先双击：
+先双击输入预检：
+
+`6_check_input_data.bat`
+
+必须在终端第一行看到：
+
+`Parser version: task2-offline-human-casefold-v2-20260825`
+
+并确认 CN、BW、UK、US 的 `recognized associations` 均大于0。预检只读取数据，不运行PCA、置换或Bootstrap，通常几秒完成。
+
+预检通过后再双击：
 
 `7a_run_task2_heterogeneity_quick.bat`
 

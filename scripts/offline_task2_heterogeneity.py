@@ -27,6 +27,7 @@ FILES = {
     "DeepSeek": "deepseek.xlsx", "Doubao": "doubao.xlsx", "GPT": "gpt.xlsx", "Gemini": "gemini.xlsx",
 }
 HUMANS = {"CN", "BW", "UK", "US"}
+PARSER_VERSION = "task2-offline-human-casefold-v2-20260825"
 EMOTION_LOOKUP = {emotion.casefold(): emotion for emotion in EMOTIONS}
 NO_ASSOCIATION_LABELS = {"none", "other", "n/a", "na", "无", "无关联", "其他"}
 
@@ -181,10 +182,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, default=PROJECT / "input_data")
     parser.add_argument("--preset", choices=("quick", "formal"), default="formal")
+    parser.add_argument("--check-input", action="store_true", help="validate and audit the eight workbooks without running analysis")
     args = parser.parse_args()
     options = ({"seed": 20260824, "stability": 100, "permutations": 999, "bootstrap": 200, "hungarian": 100}
                if args.preset == "quick" else
                {"seed": 20260824, "stability": 500, "permutations": 9999, "bootstrap": 1000, "hungarian": 500})
+    print(f"Parser version: {PARSER_VERSION}", flush=True)
     print("Loading Task 2 workbooks from", args.input.resolve(), flush=True)
     rows, summary = load_rows(args.input)
     for source, audit in summary.items():
@@ -196,11 +199,24 @@ def main() -> None:
             flush=True,
         )
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = PROJECT / "offline_results" / f"task2_heterogeneity_{args.preset}_{stamp}"
+    run_name = "input_check" if args.check_input else args.preset
+    target = PROJECT / "offline_results" / f"task2_heterogeneity_{run_name}_{stamp}"
     target.mkdir(parents=True, exist_ok=False)
-    (target / "input_summary.json").write_text(json.dumps({"preset": args.preset, "options": options, "sources": summary, "longRows": len(rows)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    input_audit = {
+        "parserVersion": PARSER_VERSION,
+        "preset": args.preset,
+        "options": options,
+        "sources": summary,
+        "longRows": len(rows),
+    }
+    (target / "input_summary.json").write_text(json.dumps(input_audit, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.check_input:
+        print("Input check passed. Audit:", (target / "input_summary.json").resolve(), flush=True)
+        return
     print(f"Loaded {len(rows):,} long rows. Starting {args.preset} analysis...", flush=True)
     result = run_task2_heterogeneity({"rows": rows, "options": options}, progress=Progress())
+    result["offlineParserVersion"] = PARSER_VERSION
+    result["inputAudit"] = summary
     with gzip.open(target / "task2_heterogeneity_result.json.gz", "wt", encoding="utf-8") as handle:
         json.dump(result, handle, ensure_ascii=False, allow_nan=False)
     tables = {

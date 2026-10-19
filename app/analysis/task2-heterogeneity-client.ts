@@ -4,6 +4,7 @@ const BASE_URL = "http://127.0.0.1:8773";
 export type HeterogeneityResult = {
   version:number; randomSeed:number; colors:string[]; emotions:string[]; humanSources:string[]; aiSources:string[];
   offlineNormalizationCount?:number;
+  offlineParserVersion?:string; inputAudit?:Record<string,unknown>;
   config:{stability:number;permutations:number;bootstrap:number;hungarian:number};
   qc:{rows:ExportRow[];includedProfiles:number;excluded:number;dimensions:number};
   subgroups:{validation:ExportRow[];assignmentsHuman:ExportRow[];assignmentsAi:ExportRow[];profiles:ExportRow[];composition:ExportRow[];pca:ExportRow[]};

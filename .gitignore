@@ -42,3 +42,8 @@ next-env.d.ts
 /outputs/
 /work/
 /.cache/
+
+# Project data boundaries
+/data/raw/
+/data/private/
+*.zip

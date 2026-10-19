@@ -7,10 +7,13 @@ sys.path.insert(0, str(ROOT / "python_figures"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from task2_heterogeneity import COLORS, EMOTIONS, run_task2_heterogeneity
-from offline_task2_heterogeneity import parse_associations
+from offline_task2_heterogeneity import PARSER_VERSION, parse_associations
 
 
 class Task2HeterogeneityTests(unittest.TestCase):
+    def test_fixed_offline_parser_has_auditable_version(self):
+        self.assertEqual(PARSER_VERSION, "task2-offline-human-casefold-v2-20260825")
+
     def test_offline_parser_normalizes_human_lowercase_labels(self):
         parsed = parse_associations('[{"emotion":"love","intensity":4},{"emotion":"compassion","intensity":3}]')
         self.assertEqual(parsed, [

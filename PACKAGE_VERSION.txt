@@ -1,6 +1,8 @@
-Chromalab 3006 R9000P Task 2 Heterogeneity · Human PCA Fix
+Chromalab 3006 R9000P Task 2 Heterogeneity · Human PCA Fix V2
 Built: 2026-08-25
 Seed: 20260824
 Includes: participant/run 220D profiles, PCA/PAM, Energy, RBF-MMD, bidirectional NN, Hungarian matching.
 Formal preset: stability 500; Energy/MMD permutation 9999; bootstrap 1000; Hungarian 500.
 Fix: case-insensitive GEW emotion parsing for Human exports; unknown labels and all-zero parsed sources now stop before analysis.
+Parser version: task2-offline-human-casefold-v2-20260825
+V2 guard: input-only preflight, result provenance, and rejection of legacy all-zero Human result imports.

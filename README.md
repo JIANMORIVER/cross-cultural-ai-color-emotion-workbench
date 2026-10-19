@@ -1,53 +1,38 @@
-# Chromalab — AI Emotion–Color Experiment Platform
+# 跨文化 AI 色彩情感联想项目数据工作台
 
-Chromalab is a research workspace for standardized, English-only, text-based comparison of emotion–color associations across language models.
+用于研究不同语言模型与人类样本在色彩—情感联想上的异同。工作台整合了实验平台、离线统计分析脚本、可复现的派生结果，以及带 Git 标签的版本演进记录。
 
-The study materials are aligned with the reference human survey:
+## 当前版本
 
-- 20 Geneva Emotion Wheel emotion terms
-- 11 anonymous color IDs and sRGB HEX values
-- Word → Color and Color → Emotion task definitions
-- no cultural framing, visual swatches, color names, or conversation history
+当前工作树对应 **v1.2.1-human-pca-fix-v2-20260825**：在任务二异质性分析中，针对 Human 导出文件加入大小写无关的 Geneva Emotion Wheel 情绪解析、输入预检、结果溯源及对旧版全零结果的拒绝机制。
 
-## Current prototype
+完整版本说明见 [VERSION_HISTORY.md](VERSION_HISTORY.md)。
 
-Implemented:
+## 目录说明
 
-- six-step research workflow
-- durable project, model, experiment, and result schemas using D1
-- four starter OpenAI-compatible model profiles
-- session-only API keys and live minimal connection tests
-- experiment request-volume calculations and locked study conditions
-- per-model Temperature, Top P, and maximum-output controls
-- prominent provider-specific model variant picker plus custom Model ID input
-- single-model scope that requires only the selected model credential
-- one-request real pilots for both tasks, saving validated Interest → Color or J0 → Emotion results
-- Color → Emotion uses a partial-or-complete 20-emotion selection with integer intensity levels 1–5
-- seeded, reproducible shuffling for the 20 Word → Color stimuli, 11 Color → Emotion stimuli, and in-prompt emotion options
-- independently switchable prompt seed tag, native API seed, and equivalent prompt-variant rotation policies
-- runner readiness, pause/resume controls, data-review table, and filtering
-- JSON/CSV configuration and study-material exports
-- source-format result CSVs: Word → Color grouped by model and repetition, Color → Emotion kept per source request
-- 91-column SurveyResponse XLSX matching the supplied data-format sample, with row manifest and experiment conditions
-- original multi-model XLSX matching the supplied Doubao layout, with separate result and experiment-condition sheets
-- responsive desktop and mobile interface
+| 路径 | 内容 |
+| --- | --- |
+| `app/` | Next.js 实验与分析工作台前端及 API 路由 |
+| `python_figures/` | Python 分析、统计检验和图形生成模块 |
+| `analysis/` | 任务二日内瓦情绪轮的独立分析脚本和依赖清单 |
+| `data/derived/phase2_current/` | 已整理的派生统计表、分析摘要与可视化结果 |
+| `scripts/` | Windows 环境检查及离线正式分析脚本 |
+| `tests/` | 前端与 Python 分析模块的测试 |
+| `drizzle/`、`db/` | D1/Drizzle 数据库定义及迁移 |
 
-The production collection worker is intentionally not simulated. Queue dispatch, structured-output validation, and retries are the next implementation layer.
+## 本地运行
 
-## Local development
+平台部分需要 Node.js 22 LTS 或更新版本；离线分析建议使用 Python 3.11 x64。Windows 环境可先运行 `1_install_windows.bat`，再使用对应的任务脚本。
+
+任务二日内瓦情绪轮分析：
 
 ```bash
-npm install
-npm run dev
+python3 -m pip install -r analysis/requirements.txt
+python3 analysis/phase2_emotion_wheel_analysis.py \
+  --input-dir /path/to/SurveyResponse_csvs \
+  --output-dir outputs/phase2_current
 ```
 
-Open the local URL printed by the development server.
+## 数据与公开边界
 
-## Verification
-
-```bash
-npm run lint
-npm test
-```
-
-API keys are stored only in browser session storage. They are never written to D1 or included in exported configuration files.
+仓库只含可公开的源代码、匿名化派生结果和图表；原始问卷答卷、访问凭据、运行产物、依赖目录及压缩备份均不应提交。细则见 [DATA_POLICY.md](DATA_POLICY.md)。

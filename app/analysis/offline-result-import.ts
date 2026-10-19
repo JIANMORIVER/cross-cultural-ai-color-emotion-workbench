@@ -68,6 +68,13 @@ function validateHeterogeneity(value: unknown): HeterogeneityResult {
   const matching = value.matching as Record<string, unknown>;
   for (const key of ["nn", "hungarian", "nnDistances"]) requireArray(matching, key, "个体异质性匹配结果");
   if ((distribution.energy as unknown[]).length < 16 || (distribution.mmd as unknown[]).length < 16) throw new Error("Energy/MMD 结果少于16个 AI–Human 配对，文件可能尚未计算完成。");
+  const humanPca = (subgroups.pca as unknown[]).filter(row => isRecord(row) && row.population === "human" && row.representation === "binary") as Record<string, unknown>[];
+  const binaryNn = (matching.nn as unknown[]).filter(row => isRecord(row) && row.representation === "binary") as Record<string, unknown>[];
+  const collapsedHumanPca = humanPca.length > 0 && humanPca.every(row => Number(row.pc1) === 0 && Number(row.pc2) === 0);
+  const saturatedNn = binaryNn.length >= 16 && binaryNn.every(row => Number(row.symmetricMean) === 1);
+  if (collapsedHumanPca && saturatedNn) {
+    throw new Error("检测到旧版全零 Human 结果：Human PCA 全部为(0,0)，且16组 Binary NN 全为1.000。该文件不是大小写修复版结果，请使用带 parserVersion 的新包重新做输入预检与分析。");
+  }
   return value as unknown as HeterogeneityResult;
 }
 
