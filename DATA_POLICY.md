@@ -6,6 +6,12 @@
 - 已匿名化的聚合统计、派生 CSV、分析摘要和图形；
 - 可公开的研究材料映射与配置。
 
+仅在私有仓库中允许提交：
+
+- 含假名化 `participant_id` 与人口统计字段的参与者级派生表，例如 `data/derived/phase2_current/01_participant_qc.csv` 和 `02_selected_responses.csv`。
+
+将仓库公开前，必须删除这些参与者级表，或按所在机构的伦理审批与数据共享规则重新审核。
+
 不得提交：
 
 - 原始答卷、可识别个体的数据、访问令牌、API 密钥、Cookie 或 `.env` 文件；
