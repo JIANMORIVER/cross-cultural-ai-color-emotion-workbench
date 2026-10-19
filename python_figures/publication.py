@@ -696,7 +696,11 @@ def _task2(payload: dict[str, Any]) -> plt.Figure:
     elif kind == "task2-03":
         axis = figure.add_subplot(111)
         matrix = np.eye(len(sources))
+        significance: dict[frozenset[str], str] = {}
         for row in analysis:
+            if row.get("ai_source") and row.get("human_source"):
+                significance[frozenset({_text(row, "ai_source"), _text(row, "human_source")})] = _text(row, "significance_stars")
+                continue
             first, second = _text(row, "来源A"), _text(row, "来源B")
             if first not in sources or second not in sources: continue
             value = _num(row, "颜色情绪矩阵Pearson_r")
@@ -709,7 +713,7 @@ def _task2(payload: dict[str, Any]) -> plt.Figure:
         axis.set_xticks(range(len(sources)), sources, rotation=35, ha="right"); axis.set_yticks(range(len(sources)), sources)
         for y in range(len(sources)):
             for x in range(len(sources)):
-                value = matrix[y, x]; axis.text(x, y, "×" if not np.isfinite(value) else f"{value:.2f}", ha="center", va="center", fontsize=8, color="white" if np.isfinite(value) and abs(value) > .62 else "#263b43")
+                value = matrix[y, x]; stars = significance.get(frozenset({sources[y], sources[x]}), "") if y != x else ""; axis.text(x, y, "×" if not np.isfinite(value) else f"{value:.2f}{stars}", ha="center", va="center", fontsize=8, color="white" if np.isfinite(value) and abs(value) > .62 else "#263b43")
         figure.colorbar(image, ax=axis, fraction=.035, pad=.02, label="Pearson r")
         axis.set_title("Full 11×20 pattern similarity", fontweight="bold")
     elif kind == "task2-04":
@@ -805,6 +809,95 @@ def _task2(payload: dict[str, Any]) -> plt.Figure:
         axis = figure.add_subplot(111)
         matrix = np.array([[cell_value(source_a, color, emotion) - cell_value(source_b, color, emotion) for emotion in emotions] for color in colors]); limit = max(.05 if metric == "probability" else .25, float(np.max(np.abs(matrix))) if matrix.size else 1)
         image = axis.imshow(matrix, cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto"); axis.set_xticks(range(len(emotions)), emotions, rotation=45, ha="right"); axis.set_yticks(range(len(colors)), colors); figure.colorbar(image, ax=axis, fraction=.035, pad=.02, label=f"{source_a} − {source_b}"); axis.set_title(f"Pairwise difference · {source_a} − {source_b}", fontweight="bold")
+    elif kind in {"task2-10", "task2-11", "task2-12", "task2-13"}:
+        def optional_jsd(row: dict[str, Any]) -> float:
+            value = row.get("Jensen_Shannon距离")
+            try:
+                parsed = float(value)
+                return parsed if np.isfinite(parsed) else np.nan
+            except (TypeError, ValueError):
+                return np.nan
+
+        def canonical_source(value: str) -> str:
+            token = "".join(character for character in value.lower() if character.isalnum())
+            if token == "cn" or "china" in token: return "CN"
+            if token == "bw": return "BW"
+            if token == "uk": return "UK"
+            if token in {"us", "usa"}: return "US"
+            if "deepseek" in token: return "DeepSeek"
+            if "doubao" in token: return "Doubao"
+            if token == "gpt" or "openai" in token: return "GPT"
+            if "gemini" in token: return "Gemini"
+            return value
+
+        jsd_sources = _ordered([_text(row, "来源A") for row in analysis] + [_text(row, "来源B") for row in analysis])
+        source_cohort: dict[str, str] = {}
+        for row in analysis:
+            source_cohort.setdefault(_text(row, "来源A"), _text(row, "来源A组类型"))
+            source_cohort.setdefault(_text(row, "来源B"), _text(row, "来源B组类型"))
+        humans = [source for source in jsd_sources if source_cohort.get(source) == "human" or canonical_source(source) in {"CN", "BW", "UK", "US"}]
+        ais = [source for source in jsd_sources if source_cohort.get(source) == "ai" or canonical_source(source) in {"DeepSeek", "Doubao", "GPT", "Gemini"}]
+
+        def desired_order(values: list[str], desired: list[str]) -> list[str]:
+            ordered: list[str] = []
+            for name in desired:
+                match = next((value for value in values if canonical_source(value).lower() == name.lower()), None)
+                if match and match not in ordered: ordered.append(match)
+            return ordered + sorted(value for value in values if value not in ordered)
+
+        humans = desired_order(humans, ["CN", "BW", "UK", "US"])[:4]
+        ais = desired_order(ais, ["DeepSeek", "Doubao", "GPT", "Gemini"])[:4]
+        ordered_colors = [color for color in GEW_COLORS if any(_text(row, "颜色") == color for row in analysis)]
+        valid_values = [optional_jsd(row) for row in analysis]
+        valid_values = [value for value in valid_values if np.isfinite(value)]
+        maximum = max(.01, max(valid_values) if valid_values else 1)
+
+        def distance(first: str, second: str, color: str) -> float:
+            row = next((item for item in analysis if _text(item, "颜色") == color and ((_text(item, "来源A") == first and _text(item, "来源B") == second) or (_text(item, "来源A") == second and _text(item, "来源B") == first))), None)
+            return optional_jsd(row) if row else np.nan
+
+        def pairs_within(values: list[str]) -> list[tuple[str, str]]:
+            return [(first, second) for index, first in enumerate(values) for second in values[index + 1:]]
+
+        if kind == "task2-10":
+            pairs = pairs_within(humans); title = "Human within-cohort colorwise JSD"
+        elif kind == "task2-11":
+            pairs = pairs_within(ais); title = "AI within-cohort colorwise JSD"
+        elif kind == "task2-12":
+            ai_cross = desired_order(ais, ["Doubao", "DeepSeek", "GPT", "Gemini"])
+            human_cross = desired_order(humans, ["UK", "US", "CN", "BW"])
+            pairs = [(ai, human) for ai in ai_cross for human in human_cross]; title = "AI–Human colorwise JSD"
+        else:
+            ai_cross = desired_order(ais, ["Doubao", "DeepSeek", "GPT", "Gemini"])
+            human_cross = desired_order(humans, ["UK", "US", "CN", "BW"])
+            matrix = np.array([[np.nanmean([distance(ai, human, color) for color in ordered_colors]) for human in human_cross] for ai in ai_cross])
+            plt.close(figure); figure = plt.figure(figsize=(8.5, 6.5), constrained_layout=True); axis = figure.add_subplot(111)
+            image = axis.imshow(matrix, cmap="YlGnBu", vmin=0, vmax=maximum, aspect="auto")
+            axis.set_xticks(range(len(human_cross)), [canonical_source(source) for source in human_cross]); axis.set_yticks(range(len(ai_cross)), [canonical_source(source) for source in ai_cross])
+            axis.set_xlabel("Human source"); axis.set_ylabel("AI source"); axis.set_title("AI–Human mean colorwise JSD (11 colors)", fontweight="bold")
+            for y in range(len(ai_cross)):
+                for x in range(len(human_cross)):
+                    value = matrix[y, x]
+                    axis.text(x, y, "NA" if not np.isfinite(value) else f"{value:.2f}", ha="center", va="center", fontsize=10, color="white" if np.isfinite(value) and value / maximum > .62 else "#263b43")
+            figure.colorbar(image, ax=axis, fraction=.04, pad=.025, label="Jensen–Shannon distance · lower = more similar")
+            _title(figure, payload, "AI–Human Mean JSD Summary"); return figure
+
+        matrix = np.array([[distance(first, second, color) for first, second in pairs] for color in ordered_colors])
+        target_width = max(1500, min(7200, int(options.get("width", 4500))))
+        plt.close(figure); figure = plt.figure(figsize=(target_width / 300, 7.2 if kind != "task2-12" else 8.2), constrained_layout=True); axis = figure.add_subplot(111)
+        image = axis.imshow(matrix, cmap="YlGnBu", vmin=0, vmax=maximum, aspect="auto")
+        pair_labels = [f"{canonical_source(first)}–{canonical_source(second)}" for first, second in pairs]
+        axis.set_xticks(range(len(pairs)), pair_labels, rotation=48, ha="right", fontsize=8); axis.set_yticks(range(len(ordered_colors)), ordered_colors)
+        axis.set_xlabel("Source pair"); axis.set_ylabel("Standard color"); axis.set_title(title, fontweight="bold")
+        if kind == "task2-12":
+            for boundary in [3.5, 7.5, 11.5]: axis.axvline(boundary, color="white", lw=2.2)
+            for center, label in zip([1.5, 5.5, 9.5, 13.5], ["Doubao", "DeepSeek", "GPT", "Gemini"]): axis.text(center, -1.0, label, ha="center", va="bottom", fontsize=9, fontweight="bold", color="#277b92", clip_on=False)
+        for y in range(len(ordered_colors)):
+            for x in range(len(pairs)):
+                value = matrix[y, x]
+                axis.text(x, y, "NA" if not np.isfinite(value) else f"{value:.2f}", ha="center", va="center", fontsize=7, color="white" if np.isfinite(value) and value / maximum > .62 else "#263b43")
+        figure.colorbar(image, ax=axis, fraction=.025, pad=.018, label="Jensen–Shannon distance · lower = more similar")
+        _title(figure, payload, title); return figure
     else:
         raise ValueError(f"Unsupported Task 2 figure: {kind}")
     _title(figure, payload, "Color–Emotion Association Analysis")

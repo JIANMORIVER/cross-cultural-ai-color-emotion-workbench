@@ -13,6 +13,7 @@ from publication import render_publication_figure
 from ml_analysis import run_first_phase
 from bidirectional_analysis import run_bidirectional
 from task1_similarity import SimilarityAnalysisCancelled, run_task1_similarity
+from task2_heterogeneity import HeterogeneityAnalysisCancelled, run_task2_heterogeneity
 from continuous_color_distances import AnalysisCancelled, render_continuous_distance_figure, run_continuous_distances
 
 
@@ -66,6 +67,25 @@ def _run_similarity_job(job_id: str, payload: dict[str, object], cancel_event: E
             JOBS[job_id].update({"status": "failed", "stage": "失败", "error": str(error)})
 
 
+def _run_heterogeneity_job(job_id: str, payload: dict[str, object], cancel_event: Event) -> None:
+    def update(stage: str, completed: int, total: int) -> None:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None:
+                job.update({"stage": stage, "completed": completed, "total": total})
+    try:
+        result = run_task2_heterogeneity(payload, progress=update, cancelled=cancel_event.is_set)
+        with JOBS_LOCK:
+            JOBS[job_id].update({"status": "completed", "stage": "完成", "result": result})
+    except HeterogeneityAnalysisCancelled as error:
+        with JOBS_LOCK:
+            JOBS[job_id].update({"status": "cancelled", "stage": "已取消", "error": str(error)})
+    except Exception as error:
+        print(f"[python-figures] ERROR heterogeneity job {job_id}: {type(error).__name__}: {error}", flush=True)
+        with JOBS_LOCK:
+            JOBS[job_id].update({"status": "failed", "stage": "失败", "error": str(error)})
+
+
 class FigureHandler(BaseHTTPRequestHandler):
     server_version = "ChromalabPythonFigures/1.0"
 
@@ -91,7 +111,7 @@ class FigureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._json(200, {"ok": True, "renderer": "matplotlib"})
-        elif self.path.startswith("/continuous-distance-jobs/") or self.path.startswith("/task1-similarity-jobs/"):
+        elif self.path.startswith("/continuous-distance-jobs/") or self.path.startswith("/task1-similarity-jobs/") or self.path.startswith("/task2-heterogeneity-jobs/"):
             job_id = self.path.rsplit("/", 1)[-1]
             with JOBS_LOCK:
                 job = JOBS.get(job_id)
@@ -101,7 +121,7 @@ class FigureHandler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "message": "Not found"})
 
     def do_DELETE(self) -> None:
-        if not (self.path.startswith("/continuous-distance-jobs/") or self.path.startswith("/task1-similarity-jobs/")):
+        if not (self.path.startswith("/continuous-distance-jobs/") or self.path.startswith("/task1-similarity-jobs/") or self.path.startswith("/task2-heterogeneity-jobs/")):
             self._json(404, {"ok": False, "message": "Not found"}); return
         job_id = self.path.rsplit("/", 1)[-1]
         with JOBS_LOCK:
@@ -114,7 +134,7 @@ class FigureHandler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "status": "cancelling"})
 
     def do_POST(self) -> None:
-        if self.path not in {"/render", "/ml-analysis", "/bidirectional-analysis", "/task1-similarity", "/task1-similarity-jobs", "/continuous-distances", "/continuous-distance-jobs", "/continuous-distance-figure"}:
+        if self.path not in {"/render", "/ml-analysis", "/bidirectional-analysis", "/task1-similarity", "/task1-similarity-jobs", "/task2-heterogeneity-jobs", "/continuous-distances", "/continuous-distance-jobs", "/continuous-distance-figure"}:
             self._json(404, {"ok": False, "message": "Not found"})
             return
         try:
@@ -143,6 +163,14 @@ class FigureHandler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     JOBS[job_id] = {"jobId": job_id, "status": "running", "stage": "排队", "completed": 0, "total": 1, "cancelEvent": cancel_event}
                 Thread(target=_run_similarity_job, args=(job_id, payload, cancel_event), daemon=True).start()
+                self._json(202, {"jobId": job_id, "status": "running"})
+                return
+            if self.path == "/task2-heterogeneity-jobs":
+                job_id = uuid4().hex
+                cancel_event = Event()
+                with JOBS_LOCK:
+                    JOBS[job_id] = {"jobId": job_id, "status": "running", "stage": "排队", "completed": 0, "total": 1, "cancelEvent": cancel_event}
+                Thread(target=_run_heterogeneity_job, args=(job_id, payload, cancel_event), daemon=True).start()
                 self._json(202, {"jobId": job_id, "status": "running"})
                 return
             if self.path == "/ml-analysis":

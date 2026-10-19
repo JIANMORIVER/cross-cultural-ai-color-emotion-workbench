@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, runGewCompositeIndicators, runGewPairwise, runGewPatternSimilarity, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
+import { GEW_COLOURS, GEW_COLOR_HEX, GEW_EMOTIONS, runGewCompositeIndicators, runGewJsd, runGewPairwise, runGewPatternSimilarity, runGewPsiAiHumanSignificance, toCsv, type AnalysisResult, type ExportRow, type GewRow } from "./engine";
 import { FigureExportControls, type FigureExportStyle } from "./FigureExportControls";
 import { FigureSourceSelector, normalizeFigureSources, orderFigureRows, readFigurePairingMode, readFigureSourceSelection, saveFigurePairingMode, saveFigureSourceSelection, type FigurePairingMode } from "./FigureSourceSelector";
 import { downloadFigureBlob, renderPublicationFigure } from "./python-figures";
@@ -45,6 +45,7 @@ const COMPOSITE_METRICS: Record<CompositeMetric, { label: string; mean: string; 
   intensity: { label: "条件强度", mean: "平均条件强度", low: "条件强度95CI下限", high: "条件强度95CI上限", minimum: 1, maximum: 5 },
   valence: { label: "效价偏向", mean: "平均效价偏向", low: "效价偏向95CI下限", high: "效价偏向95CI上限", minimum: -1, maximum: 1 },
 };
+const JSD_FIGURES = ["10", "11", "12", "13"];
 
 function numberOf(value: unknown) {
   const number = typeof value === "number" ? value : Number(value);
@@ -114,6 +115,72 @@ function download(name: string, content: string) {
   const anchor = document.createElement("a");
   anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
 }
+
+type JsdPair = { sourceA: string; sourceB: string; label: string; block?: string };
+type JsdViewData = {
+  humanSources: string[];
+  aiSources: string[];
+  humanPairs: JsdPair[];
+  aiPairs: JsdPair[];
+  aiHumanPairs: JsdPair[];
+  humanRows: ExportRow[];
+  aiRows: ExportRow[];
+  aiHumanRows: ExportRow[];
+  meanRows: ExportRow[];
+  missingCount: number;
+  scaleMaximum: number;
+};
+
+function sourceToken(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+function canonicalSource(value: string) {
+  const token = sourceToken(value);
+  if (token === "cn" || token.includes("china")) return "CN";
+  if (token === "bw") return "BW";
+  if (token === "uk") return "UK";
+  if (token === "us" || token === "usa") return "US";
+  if (token.includes("deepseek")) return "DeepSeek";
+  if (token.includes("doubao")) return "Doubao";
+  if (token === "gpt" || token.includes("openai")) return "GPT";
+  if (token.includes("gemini")) return "Gemini";
+  return value;
+}
+function orderedSourcesForJsd(sources: string[], desired: string[]) {
+  const available = [...sources], ordered: string[] = [];
+  desired.forEach(name => {
+    const match = available.find(source => canonicalSource(source).toLowerCase() === name.toLowerCase());
+    if (match && !ordered.includes(match)) ordered.push(match);
+  });
+  return [...ordered, ...available.filter(source => !ordered.includes(source)).sort((a, b) => a.localeCompare(b))];
+}
+function jsdValue(rows: ExportRow[], sourceA: string, sourceB: string, color: string) {
+  const row = rows.find(item => item["颜色"] === color && ((item["来源A"] === sourceA && item["来源B"] === sourceB) || (item["来源A"] === sourceB && item["来源B"] === sourceA)));
+  return optionalNumber(row?.["Jensen_Shannon距离"]);
+}
+function jsdCsvRows(rows: ExportRow[], pairs: JsdPair[]) {
+  return pairs.flatMap(pair => GEW_COLOURS.map(color => {
+    const row = rows.find(item => item["颜色"] === color && ((item["来源A"] === pair.sourceA && item["来源B"] === pair.sourceB) || (item["来源A"] === pair.sourceB && item["来源B"] === pair.sourceA)));
+    return { pair: pair.label, source_a: pair.sourceA, source_b: pair.sourceB, color, jsd: optionalNumber(row?.["Jensen_Shannon距离"]), status: String(row?.["计算状态"] || "missing_pair") } as ExportRow;
+  }));
+}
+function buildJsdViewData(rows: ExportRow[], sourceCohorts: Map<string, GewRow["cohort"]>): JsdViewData {
+  const allSources = [...new Set(rows.flatMap(row => [String(row["来源A"] || ""), String(row["来源B"] || "")]))].filter(Boolean);
+  const humanCandidates = allSources.filter(source => sourceCohorts.get(source) === "human" || ["CN", "BW", "UK", "US"].includes(canonicalSource(source)));
+  const aiCandidates = allSources.filter(source => sourceCohorts.get(source) === "ai" || ["DeepSeek", "Doubao", "GPT", "Gemini"].includes(canonicalSource(source)));
+  const humanSources = orderedSourcesForJsd(humanCandidates, ["CN", "BW", "UK", "US"]).slice(0, 4);
+  const aiSources = orderedSourcesForJsd(aiCandidates, ["DeepSeek", "Doubao", "GPT", "Gemini"]).slice(0, 4);
+  const pairsWithin = (ordered: string[]) => ordered.flatMap((sourceA, index) => ordered.slice(index + 1).map(sourceB => ({ sourceA, sourceB, label: `${canonicalSource(sourceA)}–${canonicalSource(sourceB)}` })));
+  const humanPairs = pairsWithin(humanSources), aiPairs = pairsWithin(aiSources);
+  const aiForCross = orderedSourcesForJsd(aiSources, ["Doubao", "DeepSeek", "GPT", "Gemini"]);
+  const humanForCross = orderedSourcesForJsd(humanSources, ["UK", "US", "CN", "BW"]);
+  const aiHumanPairs = aiForCross.flatMap(sourceA => humanForCross.map(sourceB => ({ sourceA, sourceB, label: `${canonicalSource(sourceA)}–${canonicalSource(sourceB)}`, block: canonicalSource(sourceA) })));
+  const humanRows = jsdCsvRows(rows, humanPairs), aiRows = jsdCsvRows(rows, aiPairs), aiHumanRows = jsdCsvRows(rows, aiHumanPairs);
+  const meanRows = aiForCross.flatMap(aiSource => humanForCross.map(humanSource => {
+    const values = GEW_COLOURS.map(color => jsdValue(rows, aiSource, humanSource, color)).filter((value): value is number => value !== null);
+    return { ai_source: aiSource, human_source: humanSource, mean_jsd: values.length ? Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(6)) : null, valid_colors: values.length } as ExportRow;
+  }));
+  const observed = rows.map(row => optionalNumber(row["Jensen_Shannon距离"])).filter((value): value is number => value !== null);
+  return { humanSources, aiSources, humanPairs, aiPairs, aiHumanPairs, humanRows, aiRows, aiHumanRows, meanRows, missingCount: rows.length - observed.length, scaleMaximum: Math.max(.01, ...observed) };
+}
 export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, pairingMode = "all" }: Task2VisualLabProps) {
   const allCells = useMemo(() => normalizeGew(data), [data]);
   const cells = useMemo(() => visibleEmotion ? allCells.filter(cell => cell.emotion === visibleEmotion) : allCells, [allCells, visibleEmotion]);
@@ -123,6 +190,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
   const pattern = useMemo(() => new Set(rawRows.map(row => row.color)).size >= GEW_COLOURS.length ? runGewPatternSimilarity(rawRows, 0).rows : [], [rawRows]);
   const sourceCohorts = useMemo(() => new Map(rawRows.map(row => [row.source, row.cohort])), [rawRows]);
   const pairwise = useMemo(() => new Set(rawRows.map(row => row.source)).size >= 2 ? runGewPairwise(rawRows).rows : [], [rawRows]);
+  const jsdRows = useMemo(() => new Set(rawRows.map(row => row.source)).size >= 2 ? runGewJsd(rawRows).rows : [], [rawRows]);
   const sources = useMemo(() => [...new Set(cells.map(cell => cell.source))], [cells]);
   const [figureSources, setFigureSources] = useState<Record<string, string[]>>({});
   const [figurePairing, setFigurePairing] = useState<Record<string, FigurePairingMode>>({});
@@ -131,23 +199,28 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
   const pairingFor = (index: string) => figurePairing[index] || pairingMode;
   const setPairingFor = (index: string, mode: FigurePairingMode) => { saveFigurePairingMode(`task2:${index}`, mode); setFigurePairing(current => ({ ...current, [index]: mode })); };
   useEffect(() => {
-    const saved = Object.fromEntries(["01", "02", "03", "04", "05", "06", "07", "08", "09"].flatMap(index => {
+    const saved = Object.fromEntries(["01", "02", "03", "04", "05", "06", "07", "08", "09", ...JSD_FIGURES].flatMap(index => {
       const value = readFigureSourceSelection(`task2:${index}`);
       return value ? [[index, value]] : [];
     }));
     if (Object.keys(saved).length) setFigureSources(current => ({ ...saved, ...current }));
-    const savedPairing = Object.fromEntries(["01", "02", "03", "04", "05", "06", "07", "08", "09"].flatMap(index => {
+    const savedPairing = Object.fromEntries(["01", "02", "03", "04", "05", "06", "07", "08", "09", ...JSD_FIGURES].flatMap(index => {
       const value = readFigurePairingMode(`task2:${index}`);
       return value ? [[index, value]] : [];
     })) as Record<string, FigurePairingMode>;
     if (Object.keys(savedPairing).length) setFigurePairing(current => ({ ...savedPairing, ...current }));
   }, []);
+  useEffect(() => { setPsiSignificance(null); setPsiError(""); }, [rawRows]);
   const cellsFor = (index: string) => orderFigureRows(cells, sourcesFor(index), cell => cell.source);
   const rawRowsFor = (index: string) => orderFigureRows(visibleRawRows, sourcesFor(index), row => row.source);
   const colors = useMemo(() => [...new Set(cells.map(cell => cell.color))], [cells]);
   const [heatSource, setHeatSource] = useState(""), [profileSource, setProfileSource] = useState(""), [profileColor, setProfileColor] = useState("");
   const [displayMetric, setDisplayMetric] = useState<GewMetric>("probability");
   const [displayView, setDisplayView] = useState<"dots" | "wheel">("wheel");
+  const [psiPermutations, setPsiPermutations] = useState(10_000);
+  const [psiSignificance, setPsiSignificance] = useState<AnalysisResult | null>(null);
+  const [psiRunning, setPsiRunning] = useState(false);
+  const [psiError, setPsiError] = useState("");
   const [cohortMetric, setCohortMetric] = useState<GewMetric>("probability");
   const [groupColor, setGroupColor] = useState(""), [groupEmotion, setGroupEmotion] = useState("");
   const [compositeMetric, setCompositeMetric] = useState<CompositeMetric>("broadness");
@@ -167,6 +240,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
   const visibleEmotions = GEW_EMOTIONS.filter(emotion => cells.some(cell => cell.emotion === emotion));
   const effectiveGroupEmotion = visibleEmotions.includes(groupEmotion as typeof GEW_EMOTIONS[number]) ? groupEmotion : (visibleEmotions[0] || "");
   const safeName = fileName.replace(/\.[^.]+$/, "").replace(/\s+/g, "-");
+  const jsdView = useMemo(() => buildJsdViewData(jsdRows, sourceCohorts), [jsdRows, sourceCohorts]);
 
   const exportOptions = (index: string, format: FigureExportStyle["format"], title: string) => {
     const metric = index === "01" || index === "02" ? cohortMetric
@@ -185,7 +259,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
       sourceCohorts: Object.fromEntries(sources.map(source => [source, sourceCohorts.get(source) || "unspecified"])),
     };
   };
-  const exportAnalysisData = (index: string) => index === "02" ? pairwise : index === "04" ? composite : index === "03" ? pattern : [];
+  const exportAnalysisData = (index: string) => index === "02" ? pairwise : index === "04" ? composite : index === "03" ? [...pattern, ...(psiSignificance?.rows || [])] : JSD_FIGURES.includes(index) ? jsdRows : [];
   const exportOneView = async (index: string, title: string, format = exportStyle.format) => {
     setExporting(true);
     try {
@@ -201,7 +275,7 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
     try {
       const { zipSync } = await import("fflate");
       const files: Record<string, Uint8Array> = {};
-      const figures = ["01", "02", "03", "04", "05", "06", "07", "08", "09"];
+      const figures = ["01", "02", "03", "04", "05", "06", "07", "08", "09", ...JSD_FIGURES];
       for (const index of figures) {
         const viewSources = sourcesFor(index), viewCells = cellsFor(index), exportRawRows = rawRowsFor(index).map(row => ({ source: row.source, color: row.color, emotion: row.emotion, intensity: row.intensity, valid: row.valid }));
         const blob = await renderPublicationFigure({ scope: "task2", kind: `task2-${index}`, cells: viewCells, rows: index === "06" ? exportRawRows : [], data: exportAnalysisData(index), options: { ...exportOptions(index, format, `Color–Emotion Figure ${index}`), sourceOrder: viewSources, pairingMode: pairingFor(index) } });
@@ -211,6 +285,15 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "科研图批量导出失败。");
     } finally { setExporting(false); }
+  };
+  const runPsiSignificance = async () => {
+    setPsiRunning(true); setPsiError("");
+    await new Promise(resolve => window.setTimeout(resolve, 20));
+    try {
+      setPsiSignificance(runGewPsiAiHumanSignificance(rawRows, psiPermutations, 20260823, 500));
+    } catch (error) {
+      setPsiSignificance(null); setPsiError(error instanceof Error ? error.message : "PSI显著性检验失败。");
+    } finally { setPsiRunning(false); }
   };
 
   return <Task2FigureExportContext.Provider value={{ safeName, style: exportStyle, disabled: !cells.length || exporting, exportView: (index, name) => void exportOneView(index, name), availableSources: sources, sourcesFor, setSourcesFor, pairingFor, setPairingFor }}><section className="task2-visual-lab visual-lab panel python-paper-view" ref={labRef} style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>
@@ -226,8 +309,11 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
         <EightGroupPairMatrix cells={cellsFor("02")} pairwise={pairwise.filter(row => sourcesFor("02").includes(String(row["来源A"] || "")) && sourcesFor("02").includes(String(row["来源B"] || "")))} sourceCohorts={new Map(sourcesFor("02").map(source => [source, sourceCohorts.get(source) || "unspecified"]))} color={effectiveGroupColor} emotion={effectiveGroupEmotion} metric={cohortMetric} pairingMode={pairingFor("02")} />
       </article>
       {pattern.length ? <article className="gew-view-block">
-        <ViewHead index="03" code="SOURCE × SOURCE" title="完整 11×20 矩阵模式相似性" note="八个来源直接两两比较；将完整关联概率矩阵展平为 220 维，便于观察人类内部、AI 内部与跨类别相似性。"><span className="analysis-count">Pearson r</span></ViewHead>
-        <PatternSimilarityMatrix rows={pattern.filter(row => sourcesFor("03").includes(String(row["来源A"] || "")) && sourcesFor("03").includes(String(row["来源B"] || "")))} sourceCohorts={sourceCohorts} sourceOrder={sourcesFor("03")} pairingMode={pairingFor("03")} />
+        <ViewHead index="03" code="SOURCE × SOURCE" title="完整 11×20 矩阵模式相似性（PSI）" note="PSI点估计与participant/run Bootstrap保持原样；新增检验仅针对16个AI–Human pair，判断正确颜色×情绪语义对齐是否高于结构保持的随机对齐。"><div className="psi-controls"><label>Permutation B<input type="number" min="1" max="50000" step="1000" disabled={psiRunning} value={psiPermutations} onChange={event => setPsiPermutations(Math.max(1, Number(event.target.value)))} /></label><button className="secondary" disabled={psiRunning || rawRows.length === 0} onClick={() => void runPsiSignificance()}>{psiRunning ? `正在运行 ${psiPermutations.toLocaleString()} 次…` : "运行 PSI 显著性检验"}</button>{psiSignificance ? <button className="secondary" onClick={() => download("psi_ai_human_significance.csv", toCsv(psiSignificance.rows))}>导出 PSI 显著性 CSV</button> : null}</div></ViewHead>
+        {psiError ? <div className="analysis-alert error"><b>PSI显著性检验未完成</b><span>{psiError}</span></div> : null}
+        <PatternSimilarityMatrix rows={pattern.filter(row => sourcesFor("03").includes(String(row["来源A"] || "")) && sourcesFor("03").includes(String(row["来源B"] || "")))} significanceRows={psiSignificance?.rows || []} sourceCohorts={sourceCohorts} sourceOrder={sourcesFor("03")} pairingMode={pairingFor("03")} />
+        {psiSignificance ? <PsiAiHumanSummary rows={psiSignificance.rows} /> : <div className="psi-awaiting"><b>4×4 AI–Human PSI显著性摘要尚未计算</b><span>默认运行10,000次固定种子结构保持置换；完成后8×8矩阵两侧同步显示FDR星号，并在下方生成16格摘要。</span></div>}
+        <div className="psi-method-note"><p><b>Bootstrap 95% CI：</b>衡量participant/run抽样不确定性。</p><p><b>Permutation p/q：</b>固定AI矩阵，分别随机排列Human矩阵的11个颜色行标签和20个情绪列标签；保留行列结构，但破坏两来源正确语义对应。16个唯一AI–Human比较统一采用BH-FDR。</p></div>
       </article> : null}
       {composite.length ? <article className="gew-view-block">
         <ViewHead index="04" code="COMPOSITE BETWEEN-GROUP" title="广度、条件强度与效价偏向" note="所有来源使用同一坐标尺度，按来源比较点估计与 participant×run Bootstrap 95% 区间；人类来源在前，AI 来源在后。"><label>指标<select value={compositeMetric} onChange={event => setCompositeMetric(event.target.value as CompositeMetric)}>{Object.entries(COMPOSITE_METRICS).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}</select></label></ViewHead>
@@ -253,8 +339,50 @@ export function Task2VisualLab({ data, fileName = "task2-gew", visibleEmotion, p
         <ViewHead index="09" code="PAIRWISE DRILL-DOWN" title="两个指定来源的差值热力图" note="直接显示 A−B；用于从8×8组间矩阵继续下钻到任意两个独立试验组。"><div className="gew-inline-controls"><Select label="来源 A" value={effectiveA} onChange={setDifferenceA} options={sources09} /><Select label="来源 B" value={effectiveB} onChange={setDifferenceB} options={sources09.filter(pair09Allowed)} /><MetricSelect value={differenceMetric} onChange={setDifferenceMetric} /></div></ViewHead>
         {effectiveB ? <GewDifference sourceA={effectiveA} sourceB={effectiveB} metric={differenceMetric} colors={colors} cells={cellsFor("09")} /> : <div className="gew-comparison-empty">至少需要两个来源才能计算来源差值。</div>}
       </article>
+      <article className="gew-view-block jsd-module-block">
+        <div className="jsd-module-head"><div><span>TASK 2 · JSD DISTANCE BY COLOR</span><h4>单一颜色的20维情绪分布距离</h4><p>每个来源×颜色先汇总20个情绪选择率，再归一化为概率分布并计算 Jensen–Shannon distance。所有图共用 0–{jsdView.scaleMaximum.toFixed(2)} 色标；越小越相似，越大越不同。</p></div><div className="jsd-csv-actions"><button className="secondary" disabled={!jsdView.humanRows.length} onClick={() => download("jsd_colorwise_human.csv", toCsv(jsdView.humanRows))}>Human CSV</button><button className="secondary" disabled={!jsdView.aiRows.length} onClick={() => download("jsd_colorwise_ai.csv", toCsv(jsdView.aiRows))}>AI CSV</button><button className="secondary" disabled={!jsdView.aiHumanRows.length} onClick={() => download("jsd_colorwise_ai_human.csv", toCsv(jsdView.aiHumanRows))}>AI–Human CSV</button><button className="secondary" disabled={!jsdView.meanRows.length} onClick={() => download("jsd_ai_human_mean.csv", toCsv(jsdView.meanRows))}>平均 JSD CSV</button><button className="secondary" disabled={!jsdRows.length} onClick={() => download("jsd_colorwise_all_pairs.csv", toCsv(jsdRows))}>全部组对 CSV</button></div></div>
+        {jsdView.missingCount ? <div className="analysis-alert warning"><b>{jsdView.missingCount} 个来源对×颜色无法计算 JSD</b><span>至少一侧的20维选择率总和为0；对应格显示 NA，CSV 的 status 字段记录具体原因。</span></div> : null}
+        <div className="jsd-figure-stack">
+          <JsdFigureHeader index="10" title="Figure A · Human 组内颜色级 JSD" note="横轴为6个人类组内配对；纵轴为11种标准色。" disabled={exporting || !jsdView.humanRows.length} onExport={() => void exportOneView("10", "JSD-Human-within-colorwise")} />
+          <JsdColorwiseHeatmap pairs={jsdView.humanPairs} rows={jsdView.humanRows} maximum={jsdView.scaleMaximum} />
+          <JsdFigureHeader index="11" title="Figure B · AI 组内颜色级 JSD" note="横轴为6个AI组内配对；纵轴颜色顺序与Figure A完全一致。" disabled={exporting || !jsdView.aiRows.length} onExport={() => void exportOneView("11", "JSD-AI-within-colorwise")} />
+          <JsdColorwiseHeatmap pairs={jsdView.aiPairs} rows={jsdView.aiRows} maximum={jsdView.scaleMaximum} />
+          <JsdFigureHeader index="12" title="Figure C · AI–Human 颜色级 JSD" note="16个跨类别组对按 Doubao、DeepSeek、GPT、Gemini 分成4个区块；用于定位具体是哪种颜色造成差异。" disabled={exporting || !jsdView.aiHumanRows.length} onExport={() => void exportOneView("12", "JSD-AI-Human-colorwise")} />
+          <JsdColorwiseHeatmap pairs={jsdView.aiHumanPairs} rows={jsdView.aiHumanRows} maximum={jsdView.scaleMaximum} grouped />
+          <JsdFigureHeader index="13" title="Figure D · AI–Human 平均 JSD 汇总" note="每格为对应AI–Human组对在11种颜色上的算术平均；越低表示总体颜色级情绪轮廓越接近。" disabled={exporting || !jsdView.meanRows.length} onExport={() => void exportOneView("13", "JSD-AI-Human-mean")} />
+          <JsdMeanHeatmap rows={jsdView.meanRows} maximum={jsdView.scaleMaximum} />
+        </div>
+        <div className="jsd-interpretation"><p><b>PSI / Pearson：</b>回答两组整张11×20颜色—情绪结构的高低变化模式有多相似。</p><p><b>颜色级 JSD：</b>回答对某一种颜色，两组20情绪分布的形状差多少。PSI高不代表每种颜色都完全一致；JSD可定位具体差异颜色。</p><p><b>Figure D：</b>平均JSD越低，只表示11种颜色总体上更接近；仍需结合Figure C确认是否由少数颜色驱动。</p></div>
+      </article>
     </>}
   </section></Task2FigureExportContext.Provider>;
+}
+
+function JsdFigureHeader({ index, title, note, disabled, onExport }: { index: string; title: string; note: string; disabled: boolean; onExport: () => void }) {
+  return <div className="jsd-figure-head"><div><span>{index} / JSD COLORWISE</span><h5>{title}</h5><p>{note} 格内为JSD，保留两位小数；数值越小表示越相似。</p></div><button className="figure-view-export" disabled={disabled} onClick={onExport}>导出此科研图</button></div>;
+}
+
+function JsdColorwiseHeatmap({ pairs, rows, maximum, grouped = false }: { pairs: JsdPair[]; rows: ExportRow[]; maximum: number; grouped?: boolean }) {
+  const rowValue = (pair: JsdPair, color: string) => optionalNumber(rows.find(row => row["pair"] === pair.label && row["color"] === color)?.["jsd"]);
+  const blocks = grouped ? [...new Set(pairs.map(pair => pair.block || ""))].filter(Boolean) : [];
+  return <div className="jsd-heatmap-scroll"><div className={`jsd-heatmap ${grouped ? "grouped" : ""}`} style={{ gridTemplateColumns: `88px repeat(${pairs.length},minmax(${grouped ? 66 : 96}px,1fr))` }}>
+    {grouped ? <><span className="jsd-corner block-corner" />{blocks.map(block => <b className="jsd-block-head" style={{ gridColumn: "span 4" }} key={block}>{block}</b>)}</> : null}
+    <span className="jsd-corner">标准色</span>{pairs.map((pair, index) => <b className={`jsd-pair-head ${grouped && index > 0 && index % 4 === 0 ? "block-start" : ""}`} key={pair.label}>{pair.label}</b>)}
+    {GEW_COLOURS.map(color => <Fragment key={color}><strong className="jsd-color-head"><i style={{ background: GEW_COLOR_HEX[color] }} />{color}</strong>{pairs.map((pair, index) => {
+      const value = rowValue(pair, color), level = value === null ? 0 : Math.min(1, value / maximum);
+      return <i className={`jsd-cell ${value === null ? "missing" : ""} ${grouped && index > 0 && index % 4 === 0 ? "block-start" : ""}`} style={value === null ? undefined : { "--jsd-level": `${level * 100}%`, color: level > .62 ? "white" : "#29414a" } as React.CSSProperties} key={`${pair.label}-${color}`} title={`${pair.label} · ${color}: ${value === null ? "NA（20维选择率总和为0或组对缺失）" : value.toFixed(6)}`}>{value === null ? "NA" : value.toFixed(2)}</i>;
+    })}</Fragment>)}
+  </div><div className="jsd-scale"><span>0 · 更相似</span><i /><span>{maximum.toFixed(2)} · 更不同</span></div></div>;
+}
+
+function JsdMeanHeatmap({ rows, maximum }: { rows: ExportRow[]; maximum: number }) {
+  const aiSources = [...new Set(rows.map(row => String(row["ai_source"] || "")))].filter(Boolean);
+  const humanSources = [...new Set(rows.map(row => String(row["human_source"] || "")))].filter(Boolean);
+  const valueFor = (ai: string, human: string) => optionalNumber(rows.find(row => row["ai_source"] === ai && row["human_source"] === human)?.["mean_jsd"]);
+  return <div className="jsd-mean-wrap"><div className="jsd-mean-heatmap" style={{ gridTemplateColumns: `120px repeat(${humanSources.length},minmax(110px,1fr))` }}><span />{humanSources.map(source => <b key={source}>{canonicalSource(source)}</b>)}{aiSources.map(ai => <Fragment key={ai}><strong>{canonicalSource(ai)}</strong>{humanSources.map(human => {
+    const value = valueFor(ai, human), level = value === null ? 0 : Math.min(1, value / maximum);
+    return <i className={value === null ? "missing" : ""} style={value === null ? undefined : { "--jsd-level": `${level * 100}%`, color: level > .62 ? "white" : "#29414a" } as React.CSSProperties} key={`${ai}-${human}`} title={`${canonicalSource(ai)}–${canonicalSource(human)} · 11色平均JSD: ${value === null ? "NA" : value.toFixed(6)}`}>{value === null ? "NA" : value.toFixed(2)}</i>;
+  })}</Fragment>)}</div><div className="jsd-scale"><span>0 · 更相似</span><i /><span>{maximum.toFixed(2)} · 更不同</span></div></div>;
 }
 
 function ViewHead({ index, code, title, note, children }: { index: string; code: string; title: string; note: string; children: React.ReactNode }) {
@@ -424,22 +552,35 @@ function CompositeIndicatorFacets({ rows, metric, sourceCohorts }: { rows: Expor
   </article>)}</div>;
 }
 
-function PatternSimilarityMatrix({ rows, sourceCohorts, sourceOrder, pairingMode }: { rows: ExportRow[]; sourceCohorts: Map<string, GewRow["cohort"]>; sourceOrder: string[]; pairingMode: "all" | "cross-cohort" }) {
+function PatternSimilarityMatrix({ rows, significanceRows, sourceCohorts, sourceOrder, pairingMode }: { rows: ExportRow[]; significanceRows: ExportRow[]; sourceCohorts: Map<string, GewRow["cohort"]>; sourceOrder: string[]; pairingMode: "all" | "cross-cohort" }) {
   const sources = sourceOrder;
   const valueFor = (sourceA: string, sourceB: string) => {
     if (sourceA === sourceB) return 1;
     const row = rows.find(item => (item["来源A"] === sourceA && item["来源B"] === sourceB) || (item["来源A"] === sourceB && item["来源B"] === sourceA));
     return optionalNumber(row?.["颜色情绪矩阵Pearson_r"]);
   };
+  const significanceFor = (sourceA: string, sourceB: string) => significanceRows.find(row => (row["ai_source"] === sourceA && row["human_source"] === sourceB) || (row["ai_source"] === sourceB && row["human_source"] === sourceA));
   return <div className="pattern-matrix-wrap"><div className="pattern-matrix" style={{ gridTemplateColumns: `130px repeat(${sources.length},minmax(72px,1fr))` }}>
     <span />{sources.map(source => <b className={`cohort-${sourceCohorts.get(source) || "unspecified"}`} key={source}>{source}<small>{cohortName(sourceCohorts.get(source))}</small></b>)}
     {sources.map(sourceA => <Fragment key={sourceA}><strong className={`cohort-${sourceCohorts.get(sourceA) || "unspecified"}`}>{sourceA}<small>{cohortName(sourceCohorts.get(sourceA))}</small></strong>{sources.map(sourceB => {
       if (sourceA !== sourceB && pairingMode === "cross-cohort" && sourceCohorts.get(sourceA) === sourceCohorts.get(sourceB) && (sourceCohorts.get(sourceA) === "human" || sourceCohorts.get(sourceA) === "ai")) return <i className="diagonal excluded" key={sourceB}>×</i>;
-      const value = valueFor(sourceA, sourceB), strength = value === null ? 0 : Math.abs(value);
+      const value = valueFor(sourceA, sourceB), strength = value === null ? 0 : Math.abs(value), significance = significanceFor(sourceA, sourceB), stars = String(significance?.["significance_stars"] || "");
       const background = value === null ? "#f0f2f0" : value >= 0 ? `rgba(39,123,146,${.08 + strength * .86})` : `rgba(202,105,70,${.08 + strength * .86})`;
-      return <i key={sourceB} style={{ background, color: strength > .62 ? "white" : "#29414a" }} title={`${sourceA} × ${sourceB}: ${value === null ? "不可计算" : `r=${value.toFixed(3)}`}`}>{value === null ? "—" : value.toFixed(2)}</i>;
+      return <i key={sourceB} style={{ background, color: strength > .62 ? "white" : "#29414a" }} title={`${sourceA} × ${sourceB}: ${value === null ? "不可计算" : `PSI=${value.toFixed(3)}`}${significance ? `\nBootstrap 95% CI: [${optionalNumber(significance["bootstrap_ci_low"])?.toFixed(3) ?? "NA"}, ${optionalNumber(significance["bootstrap_ci_high"])?.toFixed(3) ?? "NA"}]\nPermutation p=${optionalNumber(significance["permutation_p"])?.toFixed(6)}\nBH-FDR q=${optionalNumber(significance["fdr_q"])?.toFixed(6)}` : ""}`}>{value === null ? "—" : <>{value.toFixed(2)}<small className="psi-stars">{stars}</small></>}</i>;
     })}</Fragment>)}
-  </div><div className="pattern-scale"><span>负相关</span><i /><em>0</em><i /><span>正相关</span></div><p className="chart-note">任务卡导出的正式结果同时包含以 participant×run 为单位的 500 次 Bootstrap 95% 区间；此矩阵用于快速浏览点估计。</p></div>;
+  </div><div className="pattern-scale"><span>负相关</span><i /><em>0</em><i /><span>正相关</span></div><p className="chart-note">星号仅出现在16个AI–Human格：* q&lt;.05，** q&lt;.01，*** q&lt;.001；对称两格复用同一次检验，不重复进入FDR family。</p></div>;
+}
+
+function PsiAiHumanSummary({ rows }: { rows: ExportRow[] }) {
+  const aiSources = [...new Set(rows.map(row => String(row["ai_source"] || "")))];
+  const humanSources = [...new Set(rows.map(row => String(row["human_source"] || "")))];
+  const rowFor = (ai: string, human: string) => rows.find(row => row["ai_source"] === ai && row["human_source"] === human);
+  return <section className="psi-summary"><header><div><span>AI × HUMAN · 16 UNIQUE TESTS</span><h5>4×4 PSI 显著性摘要</h5></div><div className="psi-audit"><b>{rows.length === 16 ? "✓ 16/16" : `! ${rows.length}/16`}</b><span>BH-FDR family</span></div></header><div className="psi-summary-grid" style={{ gridTemplateColumns: `120px repeat(${humanSources.length},minmax(115px,1fr))` }}><span />{humanSources.map(source => <b key={source}>{canonicalSource(source)}</b>)}{aiSources.map(ai => <Fragment key={ai}><strong>{canonicalSource(ai)}</strong>{humanSources.map(human => {
+    const row = rowFor(ai, human), psi = optionalNumber(row?.["psi"]), stars = String(row?.["significance_stars"] || "");
+    const title = row ? `AI: ${canonicalSource(ai)}\nHuman: ${canonicalSource(human)}\nPSI: ${psi?.toFixed(3) ?? "NA"}\nBootstrap 95% CI: [${optionalNumber(row["bootstrap_ci_low"])?.toFixed(3) ?? "NA"}, ${optionalNumber(row["bootstrap_ci_high"])?.toFixed(3) ?? "NA"}]\nPermutation: B=${row["n_permutation"]}\np=${optionalNumber(row["permutation_p"])?.toFixed(6)}\nBH-FDR q=${optionalNumber(row["fdr_q"])?.toFixed(6)}\nSignificant: ${row["significant_fdr"] ? "yes" : "no"}` : "结果缺失";
+    const strength = psi === null ? 0 : Math.min(1, Math.abs(psi));
+    return <i className={row?.["significant_fdr"] ? "significant" : ""} style={{ "--psi-strength": `${strength * 100}%` } as React.CSSProperties} key={`${ai}-${human}`} title={title}>{psi === null ? "NA" : <>{psi.toFixed(2)}<small>{stars}</small></>}</i>;
+  })}</Fragment>)}</div><p>每格只检验该AI–Human pair本身的PSI是否高于随机语义对齐；不比较不同Human之间的PSI差值。</p></section>;
 }
 
 function GewHeatmap({ title, note, metric, source, colors, cells }: { title: string; note: string; metric: GewMetric; source: string; colors: string[]; cells: GewCell[] }) {

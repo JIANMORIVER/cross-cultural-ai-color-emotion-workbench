@@ -9,6 +9,7 @@ import { Task1VisualLab } from "./analysis/Task1VisualLab";
 import { Task1SimilarityLab } from "./analysis/Task1SimilarityLab";
 import { ContinuousDistanceLab } from "./analysis/ContinuousDistanceLab";
 import { Task2VisualLab } from "./analysis/Task2VisualLab";
+import { Task2HeterogeneityLab } from "./analysis/Task2HeterogeneityLab";
 import { LatentSpaceLab } from "./analysis/LatentSpaceLab";
 import { MachineLearningLab } from "./analysis/MachineLearningLab";
 import { normalizeFigureSources, orderFigureRows, readFigurePairingMode, readFigureSourceSelection } from "./analysis/FigureSourceSelector";
@@ -923,7 +924,7 @@ export function AnalysisPlatform() {
       const manifest: ExportRow[] = [];
       const jobs = [
         ...["continuous-lab", "hue-histogram", "representative-palette", "distribution-entropy", "hs-polar", "vs-density", "lab-ab-density", "lab-distribution", "mosaic", "cluster-strip", "within-delta", "delta-heatmap", "delta-box", "delta-mean", "radar", "dumbbell", "parity", "bias-bars", "rank-heatmap", "difficulty-heatmap", "gravity", "slopegraph", "bias-density"].map(kind => ({ scope: "task1" as const, kind, title: `Task1 ${kind}`, rows: colorData.rows, cells: [] as unknown[] })),
-        ...["01", "02", "03", "04", "05", "06", "07", "08", "09"].map(index => ({ scope: "task2" as const, kind: `task2-${index}`, title: `Task2 ${index}`, rows: [] as unknown[], cells: gewDescription as unknown[] })),
+        ...["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13"].map(index => ({ scope: "task2" as const, kind: `task2-${index}`, title: `Task2 ${index}`, rows: [] as unknown[], cells: gewDescription as unknown[] })),
       ];
       let completed = 0;
       for (const job of jobs) {
@@ -941,7 +942,9 @@ export function AnalysisPlatform() {
             ? runRepresentativeColors(figureRows, 3).rows
             : job.scope === "task1" && job.kind === "distribution-entropy"
               ? runContinuousHueEntropy(figureRows, 36).rows
-              : [];
+              : job.scope === "task2" && ["task2-10", "task2-11", "task2-12", "task2-13"].includes(job.kind)
+                ? runGewJsd(gewData.rows).rows
+                : [];
           for (const format of ["png", "svg"] as const) {
             const blob = await renderPublicationFigure({ scope: job.scope, kind: job.kind, rows: figureRows, data: figureData, cells: figureCells, options: { columns: 4, width: 4500, scale: 3, showTitle: true, format, title: job.title, sourceOrder: figureSources, pairingMode: figurePairingMode } });
             files[`figures/${job.scope}/${safeFileName(job.kind)}.${format}`] = new Uint8Array(await blob.arrayBuffer());
@@ -1252,5 +1255,6 @@ function Task2Dashboard({ rawRows, visibleEmotion, fileName, pairingMode }: { ra
     <div className="dashboard-kpis"><article><span>独立试验组</span><strong>{sources.size}</strong><small>{humanSources.size}个人类组 + {aiSources.size}个AI组</small></article><article><span>全部组对</span><strong>{sources.size * (sources.size - 1) / 2}</strong><small>8组时共28个两两比较</small></article><article><span>组对×分析单元</span><strong>{pairwiseRows.length.toLocaleString()}</strong><small>颜色×情绪×来源对</small></article><article><span>选择率显著组对单元</span><strong>{pairwiseRows.length ? significantPairs : "—"}</strong><small>全部两两检验统一 BH-FDR</small></article></div>
     <Task2Insights rows={rawRows} visibleEmotion={visibleEmotion} />
     <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} pairingMode={pairingMode} />
+    <Task2HeterogeneityLab rows={rawRows} fileName={fileName} />
   </>;
 }

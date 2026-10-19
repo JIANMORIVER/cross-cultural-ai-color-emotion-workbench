@@ -921,7 +921,54 @@ export function runGewPairwise(rows: GewRow[]): AnalysisResult {
 }
 
 function jsd(p:number[],q:number[]){const sumP=p.reduce((s,v)=>s+v,0)||1,sumQ=q.reduce((s,v)=>s+v,0)||1;const pp=p.map(v=>v/sumP),qq=q.map(v=>v/sumQ),m=pp.map((v,i)=>(v+qq[i])/2);const kl=(a:number[],b:number[])=>a.reduce((s,v,i)=>s+(v? v*Math.log2(v/b[i]):0),0);return (kl(pp,m)+kl(qq,m))/2;}
-export function runGewJsd(rows:GewRow[]):AnalysisResult{rows=rows.filter(row=>row.valid);const sources=[...new Set(rows.map(row=>row.source))],colors=[...new Set(rows.map(row=>row.color))],counts=summarizeGew(rows),output:ExportRow[]=[];colors.forEach(color=>sources.forEach((a,ai)=>sources.slice(ai+1).forEach(b=>{const vector=(source:string)=>GEW_EMOTIONS.map(emotion=>{const group=counts.get(`${source}\u0000${color}\u0000${emotion}`)||{n:0,yes:0};return group.yes/Math.max(1,group.n);});output.push({颜色:color,来源A:a,来源B:b,Jensen_Shannon距离:round(Math.sqrt(jsd(vector(a),vector(b))),6)});})));return{id:"task2-jsd",title:"情绪分布距离",kind:"matrix",rows:output,summary:[{label:"来源对×颜色",value:String(output.length)},{label:"颜色",value:String(colors.length)},{label:"距离范围",value:"0–1"}],note:"基于 20 个情绪的选择率向量计算 Jensen–Shannon 距离；越大表示分布差异越明显。"};}
+
+/**
+ * Compute one JSD distance for every source pair within every standard color.
+ * The input vectors are source-level emotion selection rates, not participant
+ * rows.  A zero-sum 20-emotion profile is explicitly reported as NA instead
+ * of being silently converted to a degenerate distribution.
+ */
+export function computeColorwiseJsdPairs(rows: GewRow[]): ExportRow[] {
+  const validRows = rows.filter(row => row.valid);
+  const sources = [...new Set(validRows.map(row => row.source))];
+  const observedColors = [...new Set(validRows.map(row => row.color))];
+  const colors = [...GEW_COLOURS.filter(color => observedColors.includes(color)), ...observedColors.filter(color => !GEW_COLOURS.includes(color as typeof GEW_COLOURS[number]))];
+  const counts = summarizeGew(validRows);
+  const cohorts = new Map(validRows.map(row => [row.source, row.cohort]));
+  const vector = (source: string, color: string) => GEW_EMOTIONS.map(emotion => {
+    const group = counts.get(`${source}\u0000${color}\u0000${emotion}`) || { n: 0, yes: 0 };
+    return group.n > 0 ? group.yes / group.n : 0;
+  });
+  const output: ExportRow[] = [];
+  colors.forEach(color => sources.forEach((sourceA, sourceIndex) => sources.slice(sourceIndex + 1).forEach(sourceB => {
+    const profileA = vector(sourceA, color), profileB = vector(sourceB, color);
+    const sumA = profileA.reduce((sum, value) => sum + value, 0), sumB = profileB.reduce((sum, value) => sum + value, 0);
+    const computable = sumA > 0 && sumB > 0;
+    output.push({
+      颜色: color,
+      来源A: sourceA,
+      来源B: sourceB,
+      来源A组类型: cohorts.get(sourceA) || "unspecified",
+      来源B组类型: cohorts.get(sourceB) || "unspecified",
+      A选择率总和: round(sumA, 6),
+      B选择率总和: round(sumB, 6),
+      Jensen_Shannon距离: computable ? round(Math.sqrt(jsd(profileA, profileB)), 6) : null,
+      计算状态: computable ? "ok" : sumA <= 0 && sumB <= 0 ? "both_zero_sum" : sumA <= 0 ? "source_a_zero_sum" : "source_b_zero_sum",
+    });
+  })));
+  return output;
+}
+
+export function runGewJsd(rows:GewRow[]):AnalysisResult {
+  const output = computeColorwiseJsdPairs(rows);
+  const colors = new Set(output.map(row => String(row["颜色"] || "")));
+  const missing = output.filter(row => row["Jensen_Shannon距离"] === null).length;
+  return {
+    id:"task2-jsd", title:"情绪分布距离", kind:"matrix", rows:output,
+    summary:[{label:"来源对×颜色",value:String(output.length)},{label:"颜色",value:String(colors.size)},{label:"距离范围",value:"0–1"},{label:"不可计算",value:String(missing)}],
+    note:"每个来源×颜色先形成20维情绪选择率向量并归一化，再计算以2为底的 Jensen–Shannon distance；越小表示该颜色的情绪轮廓越相似。20维选择率总和为0的来源×颜色明确记为NA。",
+  };
+}
 
 export function runGewValenceProfile(rows: GewRow[]): AnalysisResult {
   rows = rows.filter(row => row.valid);
@@ -1099,6 +1146,147 @@ export function runGewPatternSimilarity(rows: GewRow[], bootstrapIterations = 50
     id: "task2-pattern", title: "11×20 颜色—情绪模式相似性", kind: "matrix", rows: output,
     summary: [{ label: "来源", value: String(sources.length) }, { label: "来源对", value: String(output.length) }, { label: "矩阵维度", value: String(dimensions.length) }],
     note: `将每个来源的11×20关联概率矩阵展平为220维向量，计算来源对Pearson模式相似性；95%区间以participant×run为抽样单位分别在两个来源内进行${bootstrapIterations}次固定种子Bootstrap。该指标回答整体结构相似性，不替代具体单元格差异检验。`,
+  };
+}
+
+function psiCanonicalSource(value: string) {
+  const token = value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (token === "cn" || token.includes("china")) return "CN";
+  if (token === "bw") return "BW";
+  if (token === "uk") return "UK";
+  if (token === "us" || token === "usa") return "US";
+  if (token.includes("deepseek")) return "DeepSeek";
+  if (token.includes("doubao")) return "Doubao";
+  if (token === "gpt" || token.includes("openai")) return "GPT";
+  if (token.includes("gemini")) return "Gemini";
+  return value;
+}
+
+function psiOrderedSources(values: string[], desired: string[]) {
+  const ordered: string[] = [];
+  desired.forEach(name => {
+    const match = values.find(value => psiCanonicalSource(value).toLowerCase() === name.toLowerCase());
+    if (match && !ordered.includes(match)) ordered.push(match);
+  });
+  return ordered;
+}
+
+function shuffledIndices(length: number, random: () => number) {
+  const indices = Array.from({ length }, (_, index) => index);
+  for (let index = length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [indices[index], indices[swap]] = [indices[swap], indices[index]];
+  }
+  return indices;
+}
+
+function optionalFiniteNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * One-sided structured semantic-alignment test for the 16 prespecified
+ * AI–Human PSI pairs.  The existing Pearson point estimate and participant /
+ * run bootstrap are obtained unchanged from runGewPatternSimilarity().  Only
+ * the new null layer permutes the 11 row labels and 20 column labels; it never
+ * shuffles 220 cells independently.
+ */
+export function runGewPsiAiHumanSignificance(
+  rows: GewRow[],
+  permutationIterations = 10_000,
+  randomSeed = 20_260_823,
+  bootstrapIterations = 500,
+): AnalysisResult {
+  const valid = rows.filter(row => row.valid);
+  const sources = [...new Set(valid.map(row => row.source))];
+  const humanSources = psiOrderedSources(sources.filter(source => valid.some(row => row.source === source && row.cohort === "human")), ["UK", "US", "CN", "BW"]);
+  const aiSources = psiOrderedSources(sources.filter(source => valid.some(row => row.source === source && row.cohort === "ai")), ["Doubao", "DeepSeek", "GPT", "Gemini"]);
+  if (humanSources.length !== 4 || aiSources.length !== 4) {
+    throw new Error(`PSI显著性检验需要固定4个AI与4个人类来源；当前识别到 ${aiSources.length} AI + ${humanSources.length} Human。`);
+  }
+  const nPermutation = Math.max(1, Math.floor(permutationIterations));
+  const existing = runGewPatternSimilarity(valid, bootstrapIterations);
+  const counts = summarizeGew(valid);
+  const profile = (source: string) => GEW_COLOURS.flatMap(color => GEW_EMOTIONS.map(emotion => {
+    const group = counts.get(`${source}\u0000${color}\u0000${emotion}`) || { n: 0, yes: 0 };
+    return group.n ? group.yes / group.n : 0;
+  }));
+  const observedProfiles = new Map(sources.map(source => [source, profile(source)]));
+  const pairs = aiSources.flatMap(aiSource => humanSources.map(humanSource => ({ aiSource, humanSource })));
+  const raw = pairs.map(({ aiSource, humanSource }) => {
+    const existingRow = existing.rows.find(row => (row["来源A"] === aiSource && row["来源B"] === humanSource) || (row["来源A"] === humanSource && row["来源B"] === aiSource));
+    const observed = optionalFiniteNumber(existingRow?.["颜色情绪矩阵Pearson_r"]);
+    const aiProfile = observedProfiles.get(aiSource) || [], humanProfile = observedProfiles.get(humanSource) || [];
+    const directObserved = validCorrelation(aiProfile, humanProfile);
+    if (observed === null || !Number.isFinite(directObserved) || Math.abs(observed - directObserved) > 1e-5) {
+      throw new Error(`PSI点估计审计失败：${aiSource}–${humanSource} 的正式PSI与置换输入不一致。`);
+    }
+    const random = seededRandom(hashSeed(`${randomSeed}\u0000${psiCanonicalSource(aiSource)}\u0000${psiCanonicalSource(humanSource)}\u0000psi-structured-permutation`));
+    const nullValues = new Array<number>(nPermutation);
+    let exceedances = 0;
+    for (let iteration = 0; iteration < nPermutation; iteration += 1) {
+      const colorOrder = shuffledIndices(GEW_COLOURS.length, random), emotionOrder = shuffledIndices(GEW_EMOTIONS.length, random);
+      const permuted = new Array<number>(GEW_COLOURS.length * GEW_EMOTIONS.length);
+      let target = 0;
+      for (let colorIndex = 0; colorIndex < GEW_COLOURS.length; colorIndex += 1) {
+        for (let emotionIndex = 0; emotionIndex < GEW_EMOTIONS.length; emotionIndex += 1) {
+          permuted[target] = humanProfile[colorOrder[colorIndex] * GEW_EMOTIONS.length + emotionOrder[emotionIndex]];
+          target += 1;
+        }
+      }
+      const estimate = validCorrelation(aiProfile, permuted);
+      nullValues[iteration] = estimate;
+      if (estimate >= observed) exceedances += 1;
+    }
+    const nullMean = nullValues.reduce((sum, value) => sum + value, 0) / nullValues.length;
+    const nullSd = Math.sqrt(nullValues.reduce((sum, value) => sum + (value - nullMean) ** 2, 0) / Math.max(1, nullValues.length - 1));
+    return {
+      aiSource, humanSource, observed,
+      ciLow: optionalFiniteNumber(existingRow?.["Bootstrap95CI下限"]),
+      ciHigh: optionalFiniteNumber(existingRow?.["Bootstrap95CI上限"]),
+      bootstrapValid: optionalFiniteNumber(existingRow?.["Bootstrap有效次数"]) ?? 0,
+      p: (1 + exceedances) / (nPermutation + 1),
+      permMean: nullMean, permSd: nullSd, permQ025: percentile(nullValues, .025), permQ975: percentile(nullValues, .975),
+    };
+  });
+  const adjusted = bh(raw.map(row => row.p));
+  const output: ExportRow[] = raw.map((row, index) => ({
+    ai_source: row.aiSource,
+    human_source: row.humanSource,
+    psi: round(row.observed, 6),
+    bootstrap_ci_low: row.ciLow === null ? null : round(row.ciLow, 6),
+    bootstrap_ci_high: row.ciHigh === null ? null : round(row.ciHigh, 6),
+    n_bootstrap: bootstrapIterations,
+    bootstrap_valid: row.bootstrapValid,
+    permutation_p: round(row.p, 8),
+    fdr_q: round(adjusted[index], 8),
+    n_permutation: nPermutation,
+    significant_fdr: adjusted[index] < .05,
+    significance_stars: adjusted[index] < .001 ? "***" : adjusted[index] < .01 ? "**" : adjusted[index] < .05 ? "*" : "",
+    random_seed: randomSeed,
+    null_model: "independent color-label and emotion-label permutation",
+    perm_mean: round(row.permMean, 6),
+    perm_sd: round(row.permSd, 6),
+    perm_q025: round(row.permQ025, 6),
+    perm_q975: round(row.permQ975, 6),
+    audit_unique_pair: `${psiCanonicalSource(row.aiSource)}–${psiCanonicalSource(row.humanSource)}`,
+    audit_permutation_unit: "11 color rows + 20 emotion columns",
+  }));
+  const uniquePairs = new Set(output.map(row => String(row["audit_unique_pair"]))).size;
+  const auditOk = output.length === 16 && uniquePairs === 16 && output.every(row => row["permutation_p"] !== null && Number(row["permutation_p"]) > 0 && Number(row["n_permutation"]) === nPermutation);
+  if (!auditOk) throw new Error("PSI显著性统计审计失败：结果不是16个唯一AI–Human pair，或置换次数/p值不合规。");
+  return {
+    id: "task2-psi-ai-human-significance", title: "AI–Human PSI结构保持置换检验", kind: "statistics", rows: output,
+    summary: [
+      { label: "唯一AI–Human pair", value: String(uniquePairs) },
+      { label: "BH-FDR family", value: String(adjusted.length) },
+      { label: "每pair置换", value: String(nPermutation) },
+      { label: "固定随机种子", value: String(randomSeed) },
+      { label: "统计审计", value: auditOk ? "通过" : "失败" },
+    ],
+    note: `PSI点估计与participant/run层级${bootstrapIterations}次Bootstrap CI原样复用现有实现。单侧置换检验固定AI矩阵，仅对Human矩阵独立置换11个颜色行标签与20个情绪列标签；不独立打乱220个cell。16个预定义AI–Human pair统一进行BH-FDR校正。`,
   };
 }
 
