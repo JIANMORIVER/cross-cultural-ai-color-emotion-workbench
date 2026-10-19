@@ -7,8 +7,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "Chromalab — 情绪—颜色实验与数据分析平台";
-  const description = "从实验采集到 HEX、Lab、ΔE、GEW 与跨来源统计的可复现情绪—颜色研究工作台。";
+  const title = "Chromalab 3006 · 连续色彩分布距离版 — 情绪—颜色实验与数据分析平台";
+  const description = "实时模型采用 20＋11 整组提交；Gemini 使用可查询、可审计的 Native Batch API，并统一保存为逐项数据。";
   return {
     title,
     description,

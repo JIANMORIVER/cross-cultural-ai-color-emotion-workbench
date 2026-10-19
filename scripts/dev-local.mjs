@@ -7,24 +7,31 @@ const cacheRoot = path.join(root, ".cache");
 mkdirSync(path.join(cacheRoot, "matplotlib"), { recursive: true });
 mkdirSync(path.join(cacheRoot, "fontconfig"), { recursive: true });
 
+const figurePort = Number(process.env.FIGURE_PORT || 8773);
+const sitePort = Number(process.env.PORT || 3006);
+const defaultPython = process.platform === "win32"
+  ? path.join(root, ".venv", "Scripts", "python.exe")
+  : path.join(root, ".venv", "bin", "python3");
+const pythonExecutable = process.env.PYTHON || defaultPython;
 let python = null;
 try {
-  const response = await fetch("http://127.0.0.1:8765/health", { signal: AbortSignal.timeout(800) });
+  const response = await fetch(`http://127.0.0.1:${figurePort}/health`, { signal: AbortSignal.timeout(800) });
   if (!response.ok) throw new Error("unhealthy");
-  console.log("沿用已运行的 Python 图片服务：http://127.0.0.1:8765");
+  console.log(`沿用已运行的 Python 图片服务：http://127.0.0.1:${figurePort}`);
 } catch {
-  python = spawn("python3", [path.join(root, "python_figures", "server.py")], {
+  python = spawn(pythonExecutable, [path.join(root, "python_figures", "server.py")], {
     cwd: path.join(root, "python_figures"),
     env: {
       ...process.env,
       MPLCONFIGDIR: path.join(cacheRoot, "matplotlib"),
       XDG_CACHE_HOME: cacheRoot,
+      FIGURE_PORT: String(figurePort),
     },
     stdio: "inherit",
   });
 }
 
-const site = spawn(path.join(root, "node_modules", ".bin", "vinext"), ["dev"], {
+const site = spawn(path.join(root, "node_modules", ".bin", "vinext"), ["dev", "--host", "127.0.0.1", "--port", String(sitePort)], {
   cwd: root,
   env: { ...process.env, WRANGLER_LOG_PATH: ".wrangler/wrangler.log" },
   stdio: "inherit",

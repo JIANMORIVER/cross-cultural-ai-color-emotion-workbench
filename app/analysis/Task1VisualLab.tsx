@@ -1,10 +1,12 @@
 "use client";
 
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   colorRowsToExport,
   GEW_EMOTIONS,
   runColorClustering,
+  runContinuousHueEntropy,
+  runRepresentativeColors,
   runCulturalBias,
   runDeltaE,
   runHsvDistribution,
@@ -13,23 +15,43 @@ import {
   type CanonicalColorRow,
   type ExportRow,
 } from "./engine";
-import { downloadPublicationPng } from "./export-png";
 import { FigureExportControls, type FigureExportStyle } from "./FigureExportControls";
-import { downloadPngBlob, renderPythonHsvPng } from "./python-figures";
+import { FigureSourceSelector, normalizeFigureSources, orderFigureRows, readFigurePairingMode, readFigureSourceSelection, saveFigurePairingMode, saveFigureSourceSelection, type FigurePairingMode } from "./FigureSourceSelector";
+import { downloadFigureBlob, renderPublicationFigure } from "./python-figures";
 
-type ChartKind = "hs-polar" | "vs-density" | "lab-ab-density" | "lab-distribution" | "mosaic" | "cluster-strip" | "within-delta" | "delta-heatmap" | "delta-box" | "delta-mean" | "radar" | "dumbbell" | "parity" | "bias-bars" | "gravity" | "slopegraph" | "bias-density" | "rank-heatmap" | "difficulty-heatmap";
+type ChartKind = "continuous-lab" | "hue-histogram" | "representative-palette" | "distribution-entropy" | "hs-polar" | "vs-density" | "lab-ab-density" | "lab-distribution" | "mosaic" | "cluster-strip" | "within-delta" | "delta-heatmap" | "delta-box" | "delta-mean" | "radar" | "dumbbell" | "parity" | "bias-bars" | "gravity" | "slopegraph" | "bias-density" | "rank-heatmap" | "difficulty-heatmap";
+type OverlapMode = "raw" | "labels" | "rings" | "bubbles";
+// `core70` is retained as the serialized renderer flag for compatibility;
+// the UI presents it as relative-density / hexbin emphasis.
+type PointEmphasis = "normal" | "core70" | "proximity";
+
+const PUBLICATION_TITLES: Partial<Record<ChartKind, string>> = {
+  "continuous-lab": "Continuous CIELAB Distribution",
+  "hue-histogram": "Continuous Hue Distribution",
+  "representative-palette": "Representative Colors",
+  "distribution-entropy": "Hue Distribution Entropy",
+  "hs-polar": "Hue–Saturation Distribution",
+  "vs-density": "Value–Saturation Distribution",
+  "lab-ab-density": "CIELAB a*–b* Distribution",
+  "lab-distribution": "CIELAB Lightness and Chroma Distribution",
+  mosaic: "Raw Color Mosaic",
+};
 
 const CHARTS: Array<{ id: ChartKind; group: string; label: string; script: string }> = [
+  { id: "continuous-lab", group: "主分析 · 连续颜色空间", label: "01 · CIELAB 连续散点", script: "连续 a*–b* · 不画平均色" },
+  { id: "hue-histogram", group: "主分析 · 连续颜色空间", label: "02 · Hue 连续分布", script: "10° bins + circular smoothing" },
+  { id: "representative-palette", group: "主分析 · 解释性摘要", label: "03 · Representative Colors", script: "固定 K≤3 · 仅代表色" },
+  { id: "distribution-entropy", group: "主分析 · 解释性摘要", label: "04 · Distribution Entropy", script: "36-bin circular Hue entropy" },
   { id: "hs-polar", group: "HSV 分布", label: "H–S 极坐标分面", script: "hsvplot.py" },
   { id: "vs-density", group: "HSV 分布", label: "V–S 密度散点分面", script: "hsvplot.py" },
   { id: "lab-ab-density", group: "CIELAB 分布", label: "a*–b* 色域密度分面", script: "新增 · CIELAB D65" },
   { id: "lab-distribution", group: "CIELAB 分布", label: "L* 与色度分布 / 集中度", script: "新增 · CIELAB D65" },
   { id: "mosaic", group: "原始选择", label: "原始色彩马赛克", script: "plott.py" },
-  { id: "cluster-strip", group: "聚类", label: "K-means 权重色带", script: "Bias_kMeans_Visualization.py" },
-  { id: "within-delta", group: "色差", label: "组内一致性色差", script: "demac.py / de2mac.py" },
-  { id: "delta-heatmap", group: "色差", label: "跨来源 ΔE 热力图", script: "de3mac.py / de4mac.py" },
-  { id: "delta-box", group: "色差", label: "来源对 ΔE 分布", script: "de4mac.py" },
-  { id: "delta-mean", group: "色差", label: "来源对平均 ΔE 与基线", script: "de4mac.py" },
+  { id: "cluster-strip", group: "Supplement · 聚类", label: "K-means 权重色带（自适应 K · 补充）", script: "Bias_kMeans_Visualization.py" },
+  { id: "within-delta", group: "Supplement · 色差", label: "组内一致性色差", script: "demac.py / de2mac.py" },
+  { id: "delta-heatmap", group: "Supplement · 色差", label: "跨来源 ΔE 热力图", script: "de3mac.py / de4mac.py" },
+  { id: "delta-box", group: "Supplement · 色差", label: "来源对 ΔE 分布", script: "de4mac.py" },
+  { id: "delta-mean", group: "Supplement · 色差", label: "来源对平均 ΔE 与基线", script: "de4mac.py" },
   { id: "radar", group: "深度比较", label: "情绪色差雷达图", script: "de5mac.py" },
   { id: "dumbbell", group: "深度比较", label: "情绪难度哑铃图", script: "de5mac.py" },
   { id: "parity", group: "深度比较", label: "人类基线一致性图", script: "de5mac.py" },
@@ -73,49 +95,64 @@ function labRowsToExport(rows: CanonicalColorRow[]): ExportRow[] {
   }));
 }
 
-function chartData(kind: ChartKind, rows: CanonicalColorRow[]) {
-  if (kind === "cluster-strip") return runColorClustering(rows).rows;
-  if (kind === "within-delta") return runWithinGroupDelta(rows).rows;
-  if (["delta-heatmap", "delta-box", "delta-mean", "radar", "dumbbell", "parity", "gravity", "slopegraph", "rank-heatmap", "difficulty-heatmap"].includes(kind)) return runDeltaE(rows).rows;
-  if (["bias-bars", "bias-density"].includes(kind)) return runCulturalBias(rows).rows;
-  if (["hs-polar", "vs-density"].includes(kind)) return runHsvDistribution(rows).rows;
-  if (["lab-ab-density", "lab-distribution"].includes(kind)) return labRowsToExport(rows);
-  return colorRowsToExport(rows);
+function chartData(kind: ChartKind, rows: CanonicalColorRow[], pairingMode: FigurePairingMode = "all") {
+  let data: ExportRow[];
+  if (kind === "representative-palette") data = runRepresentativeColors(rows, 3).rows;
+  else if (kind === "distribution-entropy") data = runContinuousHueEntropy(rows, 36).rows;
+  else if (kind === "cluster-strip") data = runColorClustering(rows).rows;
+  else if (kind === "within-delta") data = runWithinGroupDelta(rows).rows;
+  else if (["delta-heatmap", "delta-box", "delta-mean", "radar", "dumbbell", "parity", "gravity", "slopegraph", "rank-heatmap", "difficulty-heatmap"].includes(kind)) data = runDeltaE(rows).rows;
+  else if (["bias-bars", "bias-density"].includes(kind)) data = runCulturalBias(rows).rows;
+  else if (["hs-polar", "vs-density", "hue-histogram"].includes(kind)) data = runHsvDistribution(rows).rows;
+  else if (["continuous-lab", "lab-ab-density", "lab-distribution"].includes(kind)) data = labRowsToExport(rows);
+  else data = colorRowsToExport(rows);
+  if (pairingMode === "all") return data;
+  const cohorts = new Map(rows.map(row => [row.source, row.cohort]));
+  return data.filter(row => {
+    const a = String(row["来源A"] ?? row.sourceA ?? ""), b = String(row["来源B"] ?? row.sourceB ?? "");
+    const cohortA = cohorts.get(a), cohortB = cohorts.get(b);
+    return !a || !b || cohortA !== cohortB || !["human", "ai"].includes(String(cohortA));
+  });
 }
 
 export function Task1VisualLab({ rows, fileName }: { rows: CanonicalColorRow[]; fileName: string }) {
-  const [kind, setKind] = useState<ChartKind>("hs-polar"); const [referenceA, setReferenceA] = useState(""); const [referenceB, setReferenceB] = useState(""); const [selectedEmotion, setSelectedEmotion] = useState(""); const [exporting, setExporting] = useState(false); const [exportStyle, setExportStyle] = useState<FigureExportStyle>({ columns: 5, width: 2850, scale: 2, showTitle: true }); const plotRef = useRef<HTMLDivElement>(null);
-  const sources = [...new Set(rows.map(row => row.source))]; const effectiveA = sources.includes(referenceA) ? referenceA : (sources.includes("CN") ? "CN" : sources[0] || ""); const effectiveB = sources.includes(referenceB) && referenceB !== effectiveA ? referenceB : (sources.find(source => source === "BW" && source !== effectiveA) || sources.find(source => source !== effectiveA) || "");
-  const availableEmotions = GEW_EMOTIONS.filter(emotion => rows.some(row => row.emotion === emotion));
+  const [kind, setKind] = useState<ChartKind>("continuous-lab"); const [referenceA, setReferenceA] = useState(""); const [referenceB, setReferenceB] = useState(""); const [selectedEmotion, setSelectedEmotion] = useState(""); const [overlapMode, setOverlapMode] = useState<OverlapMode>("raw"); const [pointEmphasis, setPointEmphasis] = useState<PointEmphasis>("normal"); const [showClusters, setShowClusters] = useState(false); const [showCentroids, setShowCentroids] = useState(true); const [showLabDensity, setShowLabDensity] = useState(true); const [labCoordinateSystem, setLabCoordinateSystem] = useState<"cartesian" | "polar">("cartesian"); const [exporting, setExporting] = useState(false); const [exportStyle, setExportStyle] = useState<FigureExportStyle>({ columns: 5, width: 4500, scale: 2, showTitle: true, format: "png" }); const plotRef = useRef<HTMLDivElement>(null);
+  const allSources = [...new Set(rows.map(row => row.source))];
+  const [figureSourcesByKind, setFigureSourcesByKind] = useState<Partial<Record<ChartKind, string[]>>>({});
+  const [figurePairingByKind, setFigurePairingByKind] = useState<Partial<Record<ChartKind, FigurePairingMode>>>({});
+  const sources = normalizeFigureSources(allSources, figureSourcesByKind[kind]);
+  const figurePairingMode = figurePairingByKind[kind] || "all";
+  const figureRows = orderFigureRows(rows, sources, row => row.source);
+  const setFigureSources = (next: string[]) => { saveFigureSourceSelection(`task1:${kind}`, next); setFigureSourcesByKind(current => ({ ...current, [kind]: next })); };
+  const setFigurePairingMode = (mode: FigurePairingMode) => { saveFigurePairingMode(`task1:${kind}`, mode); setFigurePairingByKind(current => ({ ...current, [kind]: mode })); };
+  useEffect(() => {
+    const saved = readFigureSourceSelection(`task1:${kind}`);
+    if (saved) setFigureSourcesByKind(current => current[kind] ? current : ({ ...current, [kind]: saved }));
+    const savedPairing = readFigurePairingMode(`task1:${kind}`);
+    if (savedPairing) setFigurePairingByKind(current => current[kind] ? current : ({ ...current, [kind]: savedPairing }));
+  }, [kind]);
+  const effectiveA = sources.includes(referenceA) ? referenceA : (sources.includes("CN") ? "CN" : sources[0] || ""); const effectiveB = sources.includes(referenceB) && referenceB !== effectiveA ? referenceB : (sources.find(source => source === "BW" && source !== effectiveA) || sources.find(source => source !== effectiveA) || "");
+  const availableEmotions = GEW_EMOTIONS.filter(emotion => figureRows.some(row => row.emotion === emotion));
   const effectiveEmotion = availableEmotions.includes(selectedEmotion as typeof GEW_EMOTIONS[number]) ? selectedEmotion : availableEmotions[0] || "";
-  const emotionFaceted = kind === "hs-polar" || kind === "vs-density";
-  const visibleRows = emotionFaceted && effectiveEmotion ? rows.filter(row => row.emotion === effectiveEmotion) : rows;
-  const data = useMemo(() => chartData(kind, visibleRows), [kind, visibleRows]); const selected = CHARTS.find(chart => chart.id === kind)!; const needsReferences = ["parity", "bias-bars", "gravity", "slopegraph", "bias-density", "rank-heatmap", "difficulty-heatmap"].includes(kind);
+  const hsvFaceted = kind === "hs-polar" || kind === "vs-density";
+  const batchFaceted = hsvFaceted || ["continuous-lab", "hue-histogram", "representative-palette", "distribution-entropy", "lab-ab-density"].includes(kind);
+  // Keep the original name for the publication-facet workflow; Lab a–b adds
+  // a separate, emotion-filtered clustering view below.
+  const emotionFaceted = hsvFaceted;
+  const emotionSelectable = hsvFaceted || ["continuous-lab", "hue-histogram", "representative-palette", "distribution-entropy", "lab-ab-density"].includes(kind);
+  const activePointEmphasis: PointEmphasis = kind === "vs-density" && pointEmphasis === "proximity" ? "normal" : pointEmphasis;
+  const visibleRows = emotionSelectable && effectiveEmotion ? figureRows.filter(row => row.emotion === effectiveEmotion) : figureRows;
+  const clusterRows = useMemo(() => kind === "lab-ab-density" && showClusters ? runColorClustering(visibleRows).rows : [], [kind, showClusters, visibleRows]);
+  const data = useMemo(() => chartData(kind, visibleRows, figurePairingMode), [kind, visibleRows, figurePairingMode]); const selected = CHARTS.find(chart => chart.id === kind)!; const needsReferences = ["parity", "bias-bars", "gravity", "slopegraph", "bias-density", "rank-heatmap", "difficulty-heatmap"].includes(kind);
   const safeName = (fileName || "task1").replace(/\.[^.]+$/, "").replace(/\s+/g, "-");
 
-  const exportTitle = emotionFaceted && effectiveEmotion ? `${selected.label}：${effectiveEmotion}` : selected.label;
-  async function exportCurrentPng() {
+  const publicationTitle = PUBLICATION_TITLES[kind] || "Color–Emotion Analysis";
+  const exportTitle = emotionSelectable && effectiveEmotion ? `${publicationTitle}: ${effectiveEmotion}` : publicationTitle;
+  async function exportCurrentFigure(format: FigureExportStyle["format"]) {
     setExporting(true);
     try {
-      if (emotionFaceted) {
-        const blob = await renderPythonHsvPng({
-          kind,
-          emotion: effectiveEmotion,
-          rows: visibleRows,
-          groups: sources,
-          ...exportStyle,
-        });
-        downloadPngBlob(blob, `${effectiveEmotion}_${kind === "hs-polar" ? "HS" : "VS"}_Faceted.png`);
-      } else if (plotRef.current) {
-        await downloadPublicationPng(plotRef.current, `${safeName}_${kind}.png`, {
-          minimumWidth: exportStyle.width,
-          minimumHeight: Math.max(760, Math.round(exportStyle.width * .72)),
-          scale: exportStyle.scale,
-          showTitle: exportStyle.showTitle,
-          title: exportTitle,
-          subtitle: `${sources.length} 个独立来源 · ${visibleRows.length.toLocaleString()} 个色彩观察 · 白底论文分面`,
-        });
-      }
+      const blob = await renderPublicationFigure({ scope: "task1", kind, rows: visibleRows, data, clusters: clusterRows, options: { ...exportStyle, format, title: exportTitle, sourceOrder: sources, pairingMode: figurePairingMode, overlapMode, pointEmphasis: activePointEmphasis, showClusters, showCentroids, showLabDensity, labCoordinateSystem } });
+      downloadFigureBlob(blob, `${safeName}_${kind}.${format}`);
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "PNG 导出失败。");
     } finally {
@@ -124,25 +161,21 @@ export function Task1VisualLab({ rows, fileName }: { rows: CanonicalColorRow[]; 
   }
 
   async function exportAllEmotionFacets() {
-    if (!emotionFaceted || !availableEmotions.length) return;
+    if (!batchFaceted || !availableEmotions.length) return;
     setExporting(true);
     try {
       const { zipSync } = await import("fflate");
       const files: Record<string, Uint8Array> = {};
       for (const emotion of availableEmotions) {
-        const blob = await renderPythonHsvPng({
-          kind,
-          emotion,
-          rows: rows.filter(row => row.emotion === emotion),
-          groups: sources,
-          ...exportStyle,
-        });
-        files[`${emotion}_${kind === "hs-polar" ? "HS" : "VS"}_Faceted.png`] = new Uint8Array(await blob.arrayBuffer());
+        const emotionRows = figureRows.filter(row => row.emotion === emotion);
+        const emotionClusters = kind === "lab-ab-density" && showClusters ? runColorClustering(emotionRows).rows : [];
+        const blob = await renderPublicationFigure({ scope: "task1", kind, rows: emotionRows, data: chartData(kind, emotionRows, figurePairingMode), clusters: emotionClusters, options: { ...exportStyle, title: `${publicationTitle}: ${emotion}`, sourceOrder: sources, pairingMode: figurePairingMode, overlapMode, pointEmphasis: activePointEmphasis, showClusters, showCentroids, showLabDensity, labCoordinateSystem } });
+        files[`${emotion}_${kind}.${exportStyle.format}`] = new Uint8Array(await blob.arrayBuffer());
       }
       const url = URL.createObjectURL(new Blob([zipSync(files, { level: 1 })], { type: "application/zip" }));
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${safeName}_${kind}_20-emotions.zip`;
+      anchor.download = `${safeName}_${kind}_20-emotions-${exportStyle.format}.zip`;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
@@ -153,22 +186,119 @@ export function Task1VisualLab({ rows, fileName }: { rows: CanonicalColorRow[]; 
   }
 
   return <section className="visual-lab panel">
-    <div className="visual-lab-head"><div><span className="eyebrow">{emotionFaceted ? "PYTHON · MATPLOTLIB 原生导出" : "PYTHON PAPER STYLE · 300 DPI READY"}</span><h3>{exportTitle}</h3><p>对应 {selected.script} · 当前图 {visibleRows.length.toLocaleString()} 个观察 · {emotionFaceted ? "直接对应 hsvplot.py；最终 PNG 无网页卡片边框" : "当前分析视图"}</p></div><div className="visual-export"><button className="secondary" disabled={!data.length} onClick={() => download(`${safeName}_${kind}.csv`, toCsv(data))}>导出图表数据 CSV</button></div></div>
-    <div className="visual-lab-controls"><label>可视化分析<select value={kind} onChange={event => setKind(event.target.value as ChartKind)}>{[...new Set(CHARTS.map(chart => chart.group))].map(group => <optgroup key={group} label={group}>{CHARTS.filter(chart => chart.group === group).map(chart => <option key={chart.id} value={chart.id}>{chart.label}</option>)}</optgroup>)}</select></label>{emotionFaceted ? <label>情绪分面图<select value={effectiveEmotion} onChange={event => setSelectedEmotion(event.target.value)}>{availableEmotions.map(emotion => <option key={emotion}>{emotion}</option>)}</select></label> : null}{needsReferences ? <><label>参照 A<select value={effectiveA} onChange={event => setReferenceA(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label><label>参照 B<select value={effectiveB} onChange={event => setReferenceB(event.target.value)}>{sources.filter(source => source !== effectiveA).map(source => <option key={source}>{source}</option>)}</select></label></> : null}</div>
-    <FigureExportControls value={exportStyle} onChange={setExportStyle} onExport={() => void exportCurrentPng()} exportLabel={emotionFaceted ? "Python 导出当前 PNG" : "导出当前视图 PNG"} disabled={!visibleRows.length} busy={exporting} batchAction={emotionFaceted ? { label: `Python 批量导出 ${availableEmotions.length} 个情绪 ZIP`, onClick: () => void exportAllEmotionFacets(), disabled: !availableEmotions.length } : undefined} />
-    <div className="visual-stage python-paper-view" ref={plotRef} style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>{!visibleRows.length ? <VisualEmpty /> : kind === "hs-polar" ? <HsPolar rows={visibleRows} /> : kind === "vs-density" ? <VsDensity rows={visibleRows} /> : kind === "lab-ab-density" ? <LabAbDensity rows={visibleRows} /> : kind === "lab-distribution" ? <LabDistributions rows={visibleRows} /> : kind === "mosaic" ? <Mosaic rows={visibleRows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}</div>
+    <div className="visual-lab-head"><div><span className="eyebrow">{hsvFaceted ? "PYTHON · MATPLOTLIB 原生导出" : "PYTHON PAPER STYLE · 300 DPI READY"}</span><h3>{exportTitle}</h3><p>对应 {selected.script} · 当前图 {visibleRows.length.toLocaleString()} 个观察 · {hsvFaceted ? "直接对应 hsvplot.py；最终 PNG 无网页卡片边框" : "当前分析视图"}</p></div><div className="visual-export"><button className="secondary" disabled={!data.length} onClick={() => download(`${safeName}_${kind}.csv`, toCsv(data))}>导出图表数据 CSV</button></div></div>
+    <div className="visual-lab-controls">
+      <label>可视化分析<select value={kind} onChange={event => setKind(event.target.value as ChartKind)}>{[...new Set(CHARTS.map(chart => chart.group))].map(group => <optgroup key={group} label={group}>{CHARTS.filter(chart => chart.group === group).map(chart => <option key={chart.id} value={chart.id}>{chart.label}</option>)}</optgroup>)}</select></label>
+      <FigureSourceSelector available={allSources} selected={sources} onChange={setFigureSources} pairingMode={figurePairingMode} onPairingModeChange={setFigurePairingMode} compact />
+      {emotionSelectable ? <label>情绪分面图<select value={effectiveEmotion} onChange={event => setSelectedEmotion(event.target.value)}>{availableEmotions.map(emotion => <option key={emotion}>{emotion}</option>)}</select></label> : null}
+      {hsvFaceted ? <><label className="overlap-display-toggle"><span><b>导出重叠呈现</b><small>仅处理同坐标重复点</small></span><select value={overlapMode} onChange={event => setOverlapMode(event.target.value as OverlapMode)}><option value="raw">关闭 · 原始点</option><option value="labels">数字展开 · ×N</option><option value="rings">空心计数气泡</option><option value="bubbles">气泡面积编码</option></select></label><label className="overlap-display-toggle"><span><b>点强调方式</b><small>不改变原始数据</small></span><select value={pointEmphasis} onChange={event => setPointEmphasis(event.target.value as PointEmphasis)}><option value="normal">关闭 · 正常显示</option><option value="core70">密度 / hexbin · 叠加色点</option>{kind === "hs-polar" ? <option value="proximity">邻近密度 · 近深远浅</option> : null}</select></label></> : null}
+      {kind === "lab-ab-density" ? <><label className="overlap-display-toggle"><span><b>a*–b* 坐标系</b><small>导出 PNG / SVG 同步</small></span><select value={labCoordinateSystem} onChange={event => setLabCoordinateSystem(event.target.value as "cartesian" | "polar")}><option value="cartesian">直角坐标 · a* × b*</option><option value="polar">极坐标 · 色度 × 方向</option></select></label><label className="overlap-display-toggle"><input type="checkbox" checked={showLabDensity} onChange={event => setShowLabDensity(event.target.checked)} /><span><b>显示面积密度色块</b><small>二维分箱背景；页面与导出同步</small></span></label><label className="overlap-display-toggle"><input type="checkbox" checked={showCentroids} onChange={event => setShowCentroids(event.target.checked)} /><span><b>显示组中心点</b><small>页面与导出同步</small></span></label><label className="overlap-display-toggle"><input type="checkbox" checked={showClusters} onChange={event => setShowClusters(event.target.checked)} /><span><b>显示 Lab 聚类中心 ×</b><small>仅在 Lab a*–b* 图中显示</small></span></label></> : null}
+      {needsReferences ? <><label>参照 A<select value={effectiveA} onChange={event => setReferenceA(event.target.value)}>{sources.map(source => <option key={source}>{source}</option>)}</select></label><label>参照 B<select value={effectiveB} onChange={event => setReferenceB(event.target.value)}>{sources.filter(source => source !== effectiveA).map(source => <option key={source}>{source}</option>)}</select></label></> : null}
+    </div>
+    <FigureExportControls value={exportStyle} onChange={setExportStyle} onExport={format => void exportCurrentFigure(format)} exportLabel="导出科研图" disabled={!visibleRows.length} busy={exporting} batchAction={batchFaceted ? { label: `批量导出 ${availableEmotions.length} 个情绪 ZIP`, onClick: () => void exportAllEmotionFacets(), disabled: !availableEmotions.length } : undefined} />
+    <div className="visual-stage python-paper-view" ref={plotRef} style={{ "--figure-columns": exportStyle.columns } as React.CSSProperties}>
+      {kind === "continuous-lab" ? <p className="chart-note"><b>主分析 01：</b>每个点是一条原始自由选色；所有来源使用同一 a* / b* 坐标范围。不显示均值中心，不把颜色离散为名称。</p> : kind === "hue-histogram" ? <p className="chart-note"><b>主分析 02：</b>Hue 保持 0–360° 连续角度；10° 分箱只用于密度估计。S≤0.01 的无彩色不强行记作红色。</p> : kind === "representative-palette" ? <p className="chart-note"><b>主分析 03：</b>KMeans 固定提取最多 3 个解释性代表色。比例描述样本覆盖，不把聚类当作推断结论。</p> : kind === "distribution-entropy" ? <p className="chart-note"><b>主分析 04：</b>标准化 Hue 熵越高表示色相选择越分散；越低表示更集中或模板化，不表示更正确。</p> : hsvFaceted ? <p className="chart-note">重叠呈现：{overlapMode === "raw" ? "关闭（原始点）" : overlapMode === "labels" ? "数字展开 ×N" : overlapMode === "rings" ? "空心计数气泡" : "气泡面积编码"}；点强调：{activePointEmphasis === "normal" ? "关闭（正常显示）" : activePointEmphasis === "core70" ? "密度 / hexbin（叠加色点）" : "邻近密度（仅 H–S，近深远浅）"}。最终 PNG / SVG 使用这些设置。</p> : null}
+      {!visibleRows.length ? <VisualEmpty /> : kind === "continuous-lab" ? <LabAbDensity rows={visibleRows} clusters={[]} showCentroids={false} showDensity={false} /> : kind === "hue-histogram" ? <HueHistogram rows={visibleRows} /> : kind === "representative-palette" ? <RepresentativePalettes data={data} /> : kind === "distribution-entropy" ? <EntropyBars data={data} /> : kind === "hs-polar" ? <HsPolar rows={visibleRows} expandOverlaps={overlapMode === "labels"} core70={activePointEmphasis === "core70"} proximity={activePointEmphasis === "proximity"} /> : kind === "vs-density" ? <VsDensity rows={visibleRows} expandOverlaps={overlapMode === "labels"} core70={activePointEmphasis === "core70"} /> : kind === "lab-ab-density" ? (labCoordinateSystem === "polar" ? <LabAbPolar rows={visibleRows} clusters={clusterRows} showCentroids={showCentroids} showDensity={showLabDensity} /> : <LabAbDensity rows={visibleRows} clusters={clusterRows} showCentroids={showCentroids} showDensity={showLabDensity} />) : kind === "lab-distribution" ? <LabDistributions rows={visibleRows} /> : kind === "mosaic" ? <Mosaic rows={visibleRows} /> : kind === "cluster-strip" ? <ClusterStrips data={data} /> : kind === "within-delta" ? <WithinDelta data={data} /> : kind === "delta-heatmap" ? <DeltaHeatmap data={data} /> : kind === "delta-box" ? <DeltaBox data={data} /> : kind === "delta-mean" ? <DeltaMean data={data} /> : kind === "radar" ? <Radar data={data} /> : kind === "dumbbell" ? <Dumbbell data={data} /> : kind === "parity" ? <Parity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-bars" ? <BiasBars data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "gravity" ? <Gravity data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "slopegraph" ? <Slopegraph data={data} sources={sources} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "bias-density" ? <BiasDensity data={data} referenceA={effectiveA} referenceB={effectiveB} /> : kind === "difficulty-heatmap" ? <DifficultyHeatmap data={data} sources={sources} reference={effectiveA} /> : <RankHeatmap data={data} sources={sources} reference={effectiveA} />}
+    </div>
   </section>;
 }
 
-function HsPolar({ rows }: { rows: CanonicalColorRow[] }) {
-  return <div className="facet-grid">{groupBySource(rows).map(group => <article className="chart-facet" key={group.source}><h4>{group.source}</h4><svg viewBox="0 0 220 220" role="img" aria-label={`${group.source} H-S 极坐标分布`}><circle className="polar-grid" cx="110" cy="110" r="40" /><circle className="polar-grid" cx="110" cy="110" r="80" />{[0,90,180,270].map(angle => { const rad=angle*Math.PI/180; return <line className="polar-grid" key={angle} x1="110" y1="110" x2={110+80*Math.cos(rad)} y2={110+80*Math.sin(rad)} />; })}{group.rows.slice(0,1500).map((row,index)=>{const angle=row.hsvH*Math.PI/180, radius=row.hsvS*80;return <circle key={index} cx={110+radius*Math.cos(angle)} cy={110+radius*Math.sin(angle)} r="3.2" fill={row.hex}><title>{row.emotion} · H {round(row.hsvH,1)}° · S {round(row.hsvS,2)}</title></circle>;})}<text x="196" y="106">0°</text><text x="105" y="18">270°</text><text x="8" y="106">180°</text><text x="105" y="211">90°</text></svg><p>N={group.rows.length} · 半径=S，角度=H</p></article>)}</div>;
+function HueHistogram({ rows }: { rows: CanonicalColorRow[] }) {
+  const bins = 36;
+  const groups = groupBySource(rows);
+  const densities = groups.map(group => {
+    const chromatic = group.rows.filter(row => row.hsvS > .01);
+    const counts = histogram(chromatic.map(row => row.hsvH), bins, 360);
+    return { ...group, chromatic, counts, density: counts.map(count => count / Math.max(1, chromatic.length)) };
+  });
+  const peak = Math.max(.01, ...densities.flatMap(group => group.density));
+  return <div className="facet-grid">{densities.map((group, sourceIndex) => <article className="chart-facet" key={group.source}>
+    <h4 style={{ color: SERIES[sourceIndex % SERIES.length] }}>{group.source}</h4>
+    <svg viewBox="0 0 430 230" role="img" aria-label={`${group.source} 连续 Hue 分布`}>
+      {[0, .5, 1].map(level => <line key={level} x1="38" x2="418" y1={190 - level * 150} y2={190 - level * 150} stroke="#dfe6e7" />)}
+      {group.density.map((value, index) => <rect key={index} x={38 + index * 380 / bins} y={190 - value / peak * 150} width={380 / bins + .4} height={value / peak * 150} fill={`hsl(${index * 10 + 5} 78% 55%)`} opacity=".76"><title>{index * 10}–{(index + 1) * 10}° · n={group.counts[index]}</title></rect>)}
+      <line x1="38" x2="418" y1="190" y2="190" stroke="#52666d" />
+      {[0, 90, 180, 270, 360].map(value => <g key={value}><line x1={38 + value / 360 * 380} x2={38 + value / 360 * 380} y1="190" y2="195" stroke="#52666d" /><text x={38 + value / 360 * 380} y="211" textAnchor="middle">{value}°</text></g>)}
+      <text x="12" y="115" transform="rotate(-90 12 115)" textAnchor="middle">Probability</text>
+    </svg>
+    <p>有效 Hue n={group.chromatic.length} · 无彩色 n={group.rows.length - group.chromatic.length}</p>
+  </article>)}</div>;
 }
 
-function VsDensity({ rows }: { rows: CanonicalColorRow[] }) {
-  return <div className="facet-grid">{groupBySource(rows).map(group => { const bins=12; const counts=Array.from({length:bins*bins},()=>0); group.rows.forEach(row=>{const x=Math.min(bins-1,Math.floor(row.hsvS*bins)),y=Math.min(bins-1,Math.floor(row.hsvV*bins));counts[y*bins+x]+=1;});const max=Math.max(1,...counts);return <article className="chart-facet" key={group.source}><h4>{group.source}</h4><svg viewBox="0 0 260 220" role="img" aria-label={`${group.source} V-S 密度散点分布`}>{counts.map((count,index)=>{const x=index%bins,y=Math.floor(index/bins);return <rect key={index} x={34+x*17} y={190-(y+1)*14} width="17" height="14" fill="#277b92" opacity={count? .08+.42*count/max:0}/>;})}<line className="chart-axis" x1="34" y1="190" x2="238" y2="190"/><line className="chart-axis" x1="34" y1="22" x2="34" y2="190"/>{group.rows.slice(0,1200).map((row,index)=><circle key={index} cx={34+row.hsvS*204} cy={190-row.hsvV*168} r="2.5" fill={row.hex} opacity=".58"><title>{row.emotion} · S {round(row.hsvS,2)} · V {round(row.hsvV,2)}</title></circle>)}<text x="132" y="213">Saturation</text><text transform="translate(11 128) rotate(-90)">Value</text><text x="31" y="204">0</text><text x="232" y="204">1</text><text x="20" y="28">1</text></svg><p>N={group.rows.length} · 底色为 12×12 二维密度</p></article>;})}</div>;
+function RepresentativePalettes({ data }: { data: ExportRow[] }) {
+  const sources = [...new Set(data.map(row => labelOf(row, "来源")))];
+  return <div className="cluster-strip-list">{sources.map(source => {
+    const parts = data.filter(row => labelOf(row, "来源") === source).sort((a, b) => valueOf(a, "代表色序号") - valueOf(b, "代表色序号"));
+    return <article key={source}><div><b>{source}</b><span>K≤3 · CIELAB</span></div><div className="weighted-strip">{parts.map((part, index) => <i key={index} style={{ width: `${valueOf(part, "比例") * 100}%`, background: labelOf(part, "中心HEX") }}><span>{(valueOf(part, "比例") * 100).toFixed(0)}%</span><title>{labelOf(part, "中心HEX")} · L* {valueOf(part, "中心L").toFixed(1)} · a* {valueOf(part, "中心a").toFixed(1)} · b* {valueOf(part, "中心b").toFixed(1)}</title></i>)}</div></article>;
+  })}</div>;
 }
 
-function LabAbDensity({ rows }: { rows: CanonicalColorRow[] }) {
+function EntropyBars({ data }: { data: ExportRow[] }) {
+  const ordered = [...data].sort((a, b) => valueOf(b, "标准化色相熵") - valueOf(a, "标准化色相熵"));
+  return <div className="simple-bars">{ordered.map((row, index) => <div key={`${labelOf(row, "来源")}-${labelOf(row, "情绪")}`}><span>{index + 1}. {labelOf(row, "来源")}</span><i><b style={{ width: `${valueOf(row, "标准化色相熵") * 100}%` }} /></i><strong>{valueOf(row, "标准化色相熵").toFixed(3)}</strong><small>n={valueOf(row, "有效色相N")}</small></div>)}</div>;
+}
+
+function overlapLayout(rows: CanonicalColorRow[], keyOf: (row: CanonicalColorRow) => string, enabled: boolean) {
+  const totals = new Map<string, number>();
+  rows.forEach(row => totals.set(keyOf(row), (totals.get(keyOf(row)) || 0) + 1));
+  const seen = new Map<string, number>();
+  return rows.map(row => {
+    const key = keyOf(row), order = seen.get(key) || 0, count = totals.get(key) || 1;
+    seen.set(key, order + 1);
+    const distance = enabled && count > 1 ? Math.min(8, 2.25 * Math.sqrt(order)) : 0;
+    const angle = order * 2.399963229728653;
+    return { row, order, count, dx: Math.cos(angle) * distance, dy: Math.sin(angle) * distance };
+  });
+}
+
+function coreBinKeys(rows: CanonicalColorRow[], kind: "hs" | "vs") {
+  const hueBins = 24, radialBins = 8, bins = kind === "hs" ? [hueBins, radialBins] : [12, 12];
+  const keyOf = (row: CanonicalColorRow) => {
+    const x = kind === "hs" ? Math.min(bins[0] - 1, Math.floor((row.hsvH % 360) / 360 * bins[0])) : Math.min(bins[0] - 1, Math.floor(row.hsvS * bins[0]));
+    const y = kind === "hs" ? Math.min(bins[1] - 1, Math.floor(row.hsvS * bins[1])) : Math.min(bins[1] - 1, Math.floor(row.hsvV * bins[1]));
+    return `${x}\u0000${y}`;
+  };
+  const counts = new Map<string, number>(); rows.forEach(row => counts.set(keyOf(row), (counts.get(keyOf(row)) || 0) + 1));
+  // A relative-density cutoff avoids a fixed cumulative-coverage boundary:
+  // sparse cells fade, while cells at ≥18% of the local peak remain visible.
+  const peak = Math.max(1, ...counts.values());
+  const core = new Set([...counts.entries()].filter(([, count]) => count / peak >= .18).map(([key]) => key));
+  return { core, keyOf, bins };
+}
+
+function hsDensityBins(rows: CanonicalColorRow[], hueBins = 24, saturationBins = 10) {
+  const counts = Array.from({ length: hueBins * saturationBins }, () => 0);
+  rows.forEach(row => {
+    const x = Math.min(hueBins - 1, Math.floor((row.hsvH % 360) / 360 * hueBins));
+    const y = Math.min(saturationBins - 1, Math.floor(row.hsvS * saturationBins));
+    counts[y * hueBins + x] += 1;
+  });
+  return { counts, hueBins, saturationBins, max: Math.max(1, ...counts) };
+}
+
+function polarSectorPath(start: number, end: number, inner: number, outer: number) {
+  const point = (angle: number, radius: number) => [110 + radius * Math.cos(angle), 110 + radius * Math.sin(angle)];
+  const [x1, y1] = point(start, outer), [x2, y2] = point(end, outer), [x3, y3] = point(end, inner), [x4, y4] = point(start, inner);
+  return `M ${x1} ${y1} A ${outer} ${outer} 0 0 1 ${x2} ${y2} L ${x3} ${y3} A ${inner} ${inner} 0 0 0 ${x4} ${y4} Z`;
+}
+
+function hsNearestOpacity(rows: CanonicalColorRow[]) {
+  if (rows.length < 2) return rows.map(() => .82);
+  const points = rows.map(row => { const angle = row.hsvH * Math.PI / 180; return [row.hsvS * Math.cos(angle), row.hsvS * Math.sin(angle)]; });
+  const distances = points.map((point, index) => Math.min(...points.filter((_, other) => other !== index).map(other => Math.hypot(point[0] - other[0], point[1] - other[1]))));
+  const sorted = [...distances].sort((a, b) => a - b), low = sorted[Math.floor((sorted.length - 1) * .05)], high = sorted[Math.floor((sorted.length - 1) * .9)];
+  return distances.map(distance => .14 + .72 * (1 - Math.max(0, Math.min(1, (distance - low) / Math.max(.000001, high - low)))));
+}
+
+function HsPolar({ rows, expandOverlaps, core70, proximity }: { rows: CanonicalColorRow[]; expandOverlaps: boolean; core70: boolean; proximity: boolean }) {
+  return <div><div className="overlap-view-note"><span className={expandOverlaps || core70 || proximity ? "active" : ""}>{proximity ? "邻近密度已突出：近深远浅" : core70 ? "密度 hexbin 已叠加：保留原始色点" : expandOverlaps ? "重叠点已展开：×N 为同坐标观察数" : "原始坐标显示：重复观察会完全重叠"}</span><small>显示位移不进入统计或导出数据；邻近密度与密度底图仅作局部聚集的辅助阅读，不代表显著性</small></div><div className="facet-grid">{groupBySource(rows).map(group => { const layout=overlapLayout(group.rows.slice(0,1500),row=>`${row.hsvH.toFixed(2)}\u0000${row.hsvS.toFixed(3)}`,expandOverlaps), density=hsDensityBins(group.rows), nearby=hsNearestOpacity(group.rows); return <article className="chart-facet" key={group.source}><h4>{group.source}</h4><svg viewBox="0 0 220 220" role="img" aria-label={`${group.source} H-S 极坐标分布`}><circle className="polar-grid" cx="110" cy="110" r="40" /><circle className="polar-grid" cx="110" cy="110" r="80" />{core70 ? density.counts.map((count,index)=>{if(!count)return null;const h=index%density.hueBins,s=Math.floor(index/density.hueBins),start=h/density.hueBins*Math.PI*2,end=(h+1)/density.hueBins*Math.PI*2,inner=s/density.saturationBins*80,outer=(s+1)/density.saturationBins*80;return <path key={index} d={polarSectorPath(start,end,inner,outer)} fill="#277b92" opacity={.045+.25*count/density.max} />;}) : null}{[0,90,180,270].map(angle => { const rad=angle*Math.PI/180; return <line className="polar-grid" key={angle} x1="110" y1="110" x2={110+80*Math.cos(rad)} y2={110+80*Math.sin(rad)} />; })}{layout.map(({row,dx,dy},index)=>{const angle=row.hsvH*Math.PI/180, radius=row.hsvS*80, opacity=proximity ? nearby[index] : core70 ? (expandOverlaps ? .74 : .78) : (expandOverlaps ? .72 : .82);return <circle key={index} cx={110+radius*Math.cos(angle)+dx} cy={110+radius*Math.sin(angle)+dy} r={expandOverlaps?2.7:3.2} fill={row.hex} opacity={opacity}><title>{row.emotion} · H {round(row.hsvH,1)}° · S {round(row.hsvS,2)}</title></circle>;})}{expandOverlaps ? layout.filter(point=>point.order===0&&point.count>1).map(({row,count},index)=>{const angle=row.hsvH*Math.PI/180,radius=row.hsvS*80;return <text className="overlap-count-label" key={`count-${index}`} x={110+radius*Math.cos(angle)+7} y={110+radius*Math.sin(angle)-6}>×{count}</text>;}) : null}<text x="196" y="106">0°</text><text x="105" y="18">270°</text><text x="8" y="106">180°</text><text x="105" y="211">90°</text></svg><p>N={group.rows.length} · 半径=S，角度=H{proximity ? " · 邻近密度（近深远浅）" : core70 ? " · 密度 hexbin + 色点" : expandOverlaps ? " · 重复点已展开" : ""}</p></article>;})}</div></div>;
+}
+
+function VsDensity({ rows, expandOverlaps, core70 }: { rows: CanonicalColorRow[]; expandOverlaps: boolean; core70: boolean }) {
+  return <div><div className="overlap-view-note"><span className={expandOverlaps || core70 ? "active" : ""}>{core70 ? "密度 hexbin 已叠加：保留原始色点" : expandOverlaps ? "重叠点已展开：×N 为同坐标观察数" : "原始坐标显示：重复观察会完全重叠"}</span><small>密度底图只帮助阅读聚集区域，不参与任何统计计算</small></div><div className="facet-grid">{groupBySource(rows).map(group => { const bins=12; const counts=Array.from({length:bins*bins},()=>0); group.rows.forEach(row=>{const x=Math.min(bins-1,Math.floor(row.hsvS*bins)),y=Math.min(bins-1,Math.floor(row.hsvV*bins));counts[y*bins+x]+=1;});const max=Math.max(1,...counts),layout=overlapLayout(group.rows.slice(0,1200),row=>`${row.hsvS.toFixed(3)}\u0000${row.hsvV.toFixed(3)}`,expandOverlaps);return <article className="chart-facet" key={group.source}><h4>{group.source}</h4><svg viewBox="0 0 260 220" role="img" aria-label={`${group.source} V-S 密度散点分布`}>{counts.map((count,index)=>{const x=index%bins,y=Math.floor(index/bins);return <rect key={index} x={34+x*17} y={190-(y+1)*14} width="17" height="14" fill="#277b92" opacity={count ? .04+.38*count/max : 0}/>;})}<line className="chart-axis" x1="34" y1="190" x2="238" y2="190"/><line className="chart-axis" x1="34" y1="22" x2="34" y2="190"/>{layout.map(({row,dx,dy},index)=><circle key={index} cx={34+row.hsvS*204+dx} cy={190-row.hsvV*168+dy} r={expandOverlaps?2.3:2.5} fill={row.hex} opacity={core70 ? (expandOverlaps ? .74 : .68) : .58}><title>{row.emotion} · S {round(row.hsvS,2)} · V {round(row.hsvV,2)}</title></circle>)}{expandOverlaps ? layout.filter(point=>point.order===0&&point.count>1).map(({row,count},index)=><text className="overlap-count-label" key={`count-${index}`} x={34+row.hsvS*204+7} y={190-row.hsvV*168-6}>×{count}</text>) : null}<text x="132" y="213">Saturation</text><text transform="translate(11 128) rotate(-90)">Value</text><text x="31" y="204">0</text><text x="232" y="204">1</text><text x="20" y="28">1</text></svg><p>N={group.rows.length} · {core70 ? "密度 hexbin + 色点" : "底色为 12×12 二维密度"}{expandOverlaps ? " · 重复点已展开" : ""}</p></article>;})}</div></div>;
+}
+
+function LabAbDensity({ rows, clusters, showCentroids, showDensity }: { rows: CanonicalColorRow[]; clusters: ExportRow[]; showCentroids: boolean; showDensity: boolean }) {
   const groups = groupBySource(rows);
   const largestCoordinate = Math.max(1, ...rows.flatMap(row => [Math.abs(row.labA), Math.abs(row.labB)]));
   const limit = Math.max(40, Math.ceil(largestCoordinate / 20) * 20);
@@ -177,7 +307,7 @@ function LabAbDensity({ rows }: { rows: CanonicalColorRow[] }) {
   const xOf = (value: number) => plotX + (value + limit) / (limit * 2) * plotSize;
   const yOf = (value: number) => plotY + plotSize - (value + limit) / (limit * 2) * plotSize;
   return <div>
-    <div className="lab-scale-note"><span><i className="lab-density-key" />密度格</span><span><i className="lab-centroid-key" />组中心</span><b>全部分面使用同一坐标范围 ±{limit}</b></div>
+    <div className="lab-scale-note">{showDensity ? <span><i className="lab-density-key" />密度格</span> : null}{showCentroids ? <span><i className="lab-centroid-key" />组中心</span> : null}{clusters.length ? <span>× Lab 聚类中心</span> : null}<b>全部分面使用同一坐标范围 ±{limit}</b></div>
     <div className="facet-grid">{groups.map(group => {
       const counts = Array.from({ length: bins * bins }, () => 0);
       group.rows.forEach(row => {
@@ -190,20 +320,21 @@ function LabAbDensity({ rows }: { rows: CanonicalColorRow[] }) {
       const meanB = group.rows.reduce((sum, row) => sum + row.labB, 0) / group.rows.length;
       const chroma = group.rows.map(row => Math.hypot(row.labA, row.labB));
       const stride = Math.max(1, Math.ceil(group.rows.length / 800));
+      const sourceClusters = clusters.filter(cluster => labelOf(cluster, "来源") === group.source);
       return <article className="chart-facet lab-ab-facet" key={group.source}>
         <div className="lab-facet-title"><h4>{group.source}</h4><span>N={group.rows.length}</span></div>
         <svg viewBox="0 0 276 270" role="img" aria-label={`${group.source} CIELAB a 星 b 星色域密度分布`}>
-          {counts.map((count, index) => {
+          {showDensity ? counts.map((count, index) => {
             if (!count) return null;
             const x = index % bins, y = Math.floor(index / bins), cell = plotSize / bins;
             return <rect key={index} x={plotX + x * cell} y={plotY + plotSize - (y + 1) * cell} width={cell} height={cell} fill="#277b92" opacity={.06 + .48 * count / peak}><title>格内 N={count}</title></rect>;
-          })}
+          }) : null}
           <line className="lab-zero-axis" x1={xOf(0)} x2={xOf(0)} y1={plotY} y2={plotY + plotSize} />
           <line className="lab-zero-axis" x1={plotX} x2={plotX + plotSize} y1={yOf(0)} y2={yOf(0)} />
           <rect className="lab-plot-frame" x={plotX} y={plotY} width={plotSize} height={plotSize} />
           {group.rows.map((row, index) => index % stride === 0 ? <circle key={index} cx={xOf(row.labA)} cy={yOf(row.labB)} r="2.35" fill={row.hex} opacity=".64"><title>{row.emotion} · L* {round(row.labL, 1)} · a* {round(row.labA, 1)} · b* {round(row.labB, 1)}</title></circle> : null)}
-          <circle className="lab-centroid-halo" cx={xOf(meanA)} cy={yOf(meanB)} r="7" />
-          <circle className="lab-centroid" cx={xOf(meanA)} cy={yOf(meanB)} r="3.7"><title>组中心 a* {round(meanA, 1)} · b* {round(meanB, 1)}</title></circle>
+          {showCentroids ? <><circle className="lab-centroid-halo" cx={xOf(meanA)} cy={yOf(meanB)} r="7" /><circle className="lab-centroid" cx={xOf(meanA)} cy={yOf(meanB)} r="3.7"><title>组中心 a* {round(meanA, 1)} · b* {round(meanB, 1)}</title></circle></> : null}
+          {sourceClusters.map((cluster, index) => <g key={`cluster-${index}`}><circle cx={xOf(valueOf(cluster, "中心a"))} cy={yOf(valueOf(cluster, "中心b"))} r={4 + 7 * valueOf(cluster, "簇权重")} fill={labelOf(cluster, "中心HEX")} stroke="#172e39" strokeWidth="1.2" /><path d={`M ${xOf(valueOf(cluster, "中心a")) - 3.5} ${yOf(valueOf(cluster, "中心b")) - 3.5} L ${xOf(valueOf(cluster, "中心a")) + 3.5} ${yOf(valueOf(cluster, "中心b")) + 3.5} M ${xOf(valueOf(cluster, "中心a")) + 3.5} ${yOf(valueOf(cluster, "中心b")) - 3.5} L ${xOf(valueOf(cluster, "中心a")) - 3.5} ${yOf(valueOf(cluster, "中心b")) + 3.5}`} stroke="#172e39" strokeWidth="1.25" /><title>簇 {valueOf(cluster, "簇")} · K={valueOf(cluster, "最佳K")} · 权重 {(valueOf(cluster, "簇权重") * 100).toFixed(0)}%</title></g>)}
           <text x={plotX} y="252" textAnchor="start">绿 −a*</text><text x={plotX + plotSize} y="252" textAnchor="end">+a* 红</text>
           <text x="24" y={plotY + 5} textAnchor="middle">黄</text><text x="24" y={plotY + plotSize} textAnchor="middle">蓝</text>
         </svg>
@@ -211,6 +342,23 @@ function LabAbDensity({ rows }: { rows: CanonicalColorRow[] }) {
       </article>;
     })}</div>
     <p className="chart-note">密度格用于判断热点和多中心；彩色散点保留实际选色。a* 为绿–红轴，b* 为蓝–黄轴，图中不混用 HSL 明度。</p>
+  </div>;
+}
+
+function LabAbPolar({ rows, clusters, showCentroids, showDensity }: { rows: CanonicalColorRow[]; clusters: ExportRow[]; showCentroids: boolean; showDensity: boolean }) {
+  const groups = groupBySource(rows);
+  const maxChroma = Math.max(40, Math.ceil(Math.max(1, ...rows.map(row => Math.hypot(row.labA, row.labB))) / 20) * 20);
+  const thetaBins = 18, chromaBins = 8, center = 110, radius = 80;
+  const point = (a: number, b: number) => { const theta = -Math.atan2(b, a), r = Math.min(1, Math.hypot(a, b) / maxChroma) * radius; return [center + r * Math.cos(theta), center + r * Math.sin(theta)]; };
+  return <div>
+    <div className="lab-scale-note">{showDensity ? <span><i className="lab-density-key" />极坐标密度扇区</span> : null}{showCentroids ? <span><i className="lab-centroid-key" />组中心</span> : null}{clusters.length ? <span>× Lab 聚类中心</span> : null}<b>全部分面使用同一 C* 上限 {maxChroma}</b></div>
+    <div className="facet-grid">{groups.map(group => {
+      const counts = Array.from({ length: thetaBins * chromaBins }, () => 0);
+      group.rows.forEach(row => { const theta = (Math.atan2(row.labB, row.labA) + Math.PI * 2) % (Math.PI * 2), t = Math.min(thetaBins - 1, Math.floor(theta / (Math.PI * 2) * thetaBins)), r = Math.min(chromaBins - 1, Math.floor(Math.min(.999999, Math.hypot(row.labA, row.labB) / maxChroma) * chromaBins)); counts[r * thetaBins + t] += 1; });
+      const peak = Math.max(1, ...counts), meanA = group.rows.reduce((sum, row) => sum + row.labA, 0) / group.rows.length, meanB = group.rows.reduce((sum, row) => sum + row.labB, 0) / group.rows.length, chroma = group.rows.map(row => Math.hypot(row.labA, row.labB)), sourceClusters = clusters.filter(cluster => labelOf(cluster, "来源") === group.source), stride = Math.max(1, Math.ceil(group.rows.length / 800));
+      return <article className="chart-facet lab-ab-facet" key={group.source}><div className="lab-facet-title"><h4>{group.source}</h4><span>N={group.rows.length}</span></div><svg viewBox="0 0 220 230" role="img" aria-label={`${group.source} CIELAB 色度方向极坐标分布`}><circle className="polar-grid" cx={center} cy={center} r={radius / 3} /><circle className="polar-grid" cx={center} cy={center} r={radius * 2 / 3} /><circle className="polar-grid" cx={center} cy={center} r={radius} />{showDensity ? counts.map((count, index) => { if (!count) return null; const theta = index % thetaBins, r = Math.floor(index / thetaBins), start = -(theta + 1) / thetaBins * Math.PI * 2, end = -theta / thetaBins * Math.PI * 2; return <path key={index} d={polarSectorPath(start, end, r / chromaBins * radius, (r + 1) / chromaBins * radius)} fill="#277b92" opacity={.06 + .48 * count / peak}><title>扇区 N={count}</title></path>; }) : null}{[0, Math.PI / 2, Math.PI, Math.PI * 3 / 2].map(theta => <line className="polar-grid" key={theta} x1={center} y1={center} x2={center + radius * Math.cos(theta)} y2={center - radius * Math.sin(theta)} />)}{group.rows.map((row, index) => { if (index % stride) return null; const [x, y] = point(row.labA, row.labB); return <circle key={index} cx={x} cy={y} r="2.35" fill={row.hex} opacity=".64"><title>{row.emotion} · C* {Math.hypot(row.labA, row.labB).toFixed(1)} · a* {round(row.labA, 1)} · b* {round(row.labB, 1)}</title></circle>; })}{showCentroids ? (() => { const [x, y] = point(meanA, meanB); return <><circle className="lab-centroid-halo" cx={x} cy={y} r="7" /><circle className="lab-centroid" cx={x} cy={y} r="3.7"><title>组中心 a* {round(meanA, 1)} · b* {round(meanB, 1)}</title></circle></>; })() : null}{sourceClusters.map((cluster, index) => { const [x, y] = point(valueOf(cluster, "中心a"), valueOf(cluster, "中心b")); return <g key={`cluster-${index}`}><circle cx={x} cy={y} r={4 + 7 * valueOf(cluster, "簇权重")} fill={labelOf(cluster, "中心HEX")} stroke="#172e39" strokeWidth="1.2" /><path d={`M ${x - 3.5} ${y - 3.5} L ${x + 3.5} ${y + 3.5} M ${x + 3.5} ${y - 3.5} L ${x - 3.5} ${y + 3.5}`} stroke="#172e39" strokeWidth="1.25" /></g>; })}<text x="198" y="108">+a* 红</text><text x="110" y="18">+b* 黄</text><text x="22" y="108">−a* 绿</text><text x="110" y="211">−b* 蓝</text></svg><p>中位 C*ab {quantile(chroma, .5).toFixed(1)} · 半径=C*ab，角度=色相方向</p></article>;
+    })}</div>
+    <p className="chart-note">极坐标将 a*–b* 平面转换为“色度（半径）× 色相方向（角度）”；它只是同一 CIELAB 数据的另一种呈现，不能与 HSV 的 H–S 图混用。</p>
   </div>;
 }
 
@@ -328,7 +476,7 @@ function Parity({ data, sources, referenceA, referenceB }: { data: ExportRow[]; 
 }
 
 function biasRows(data:ExportRow[],a:string,b:string){return data.filter(row=>labelOf(row,"参照A")===a&&labelOf(row,"参照B")===b);}
-function BiasBars({ data, referenceA, referenceB }: { data: ExportRow[]; referenceA:string; referenceB:string }) {
+function BiasBars({ data, referenceA, referenceB }: { data: ExportRow[]; sources?: string[]; referenceA:string; referenceB:string }) {
   const filtered=biasRows(data,referenceA,referenceB),targets=[...new Set(filtered.map(row=>labelOf(row,"目标来源")))],max=Math.max(1,...filtered.map(row=>Math.abs(valueOf(row,"偏置指数_B减A"))));
   return <div className="bias-facets">{targets.map(target=><article key={target}><h4>{target}</h4><p>← 更接近 {referenceB} · 更接近 {referenceA} →</p>{filtered.filter(row=>labelOf(row,"目标来源")===target).sort((a,b)=>valueOf(a,"偏置指数_B减A")-valueOf(b,"偏置指数_B减A")).map((row,index)=>{const value=valueOf(row,"偏置指数_B减A");return <div key={index}><b>{labelOf(row,"情绪")}</b><i><em className={value>=0?"positive":"negative"} style={{width:`${Math.abs(value)/max*50}%`}}/></i><span>{value>0?"+":""}{value.toFixed(1)}</span></div>})}</article>)}</div>;
 }

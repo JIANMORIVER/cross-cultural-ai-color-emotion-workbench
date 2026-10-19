@@ -83,19 +83,28 @@ async function ensureSchema() {
   ].filter(([column]) => !settingsColumnNames.has(column));
   if (settingsMigrations.length) await db.batch(settingsMigrations.map(([, sql]) => db.prepare(sql)));
 
+  const resultColumns = await db.prepare("PRAGMA table_info(trial_results)").all();
+  const resultColumnNames = new Set(resultColumns.results.map(column => String(column.name)));
+  const resultMigrations = [
+    ["collection_mode", "ALTER TABLE trial_results ADD COLUMN collection_mode TEXT NOT NULL DEFAULT 'realtime'"],
+    ["source_job_id", "ALTER TABLE trial_results ADD COLUMN source_job_id TEXT NOT NULL DEFAULT ''"],
+    ["protocol_version", "ALTER TABLE trial_results ADD COLUMN protocol_version TEXT NOT NULL DEFAULT 'realtime-v1'"],
+  ].filter(([column]) => !resultColumnNames.has(column));
+  if (resultMigrations.length) await db.batch(resultMigrations.map(([, sql]) => db.prepare(sql)));
+
   const existing = await db.prepare("SELECT id FROM projects WHERE id = ?").bind(PROJECT_ID).first();
   if (!existing) {
     const now = new Date().toISOString();
     await db.batch([
       db.prepare(`INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(PROJECT_ID, "Cross-model Emotion–Color Study", "Jianmo", "Standardized English-only comparison of AI emotion–color associations.", "1.0", "GEW-20 v1.0", "Munsell-11 v1.0", "Draft", now, now),
+        .bind(PROJECT_ID, "Cross-model Emotion–Color Study · 整组提交版", "Jianmo", "20 个词选色与 11 个色选词分别整组提交，逐项解析入库的标准化 AI 情绪—颜色比较。", "1.1-20x11", "GEW-20 v1.0", "Munsell-11 v1.0", "Draft", now, now),
       db.prepare(`INSERT INTO experiment_settings (
         project_id, repetitions, run_word_to_color, run_color_to_emotion, concurrency,
         max_retry, timeout_seconds, save_raw, prompt_seed_enabled, prompt_seed_base,
         native_seed_enabled, prompt_variants_enabled, model_scope, single_model_id,
         model_slot_ids, shuffle_emotion_order, shuffle_color_order, shuffle_emotion_options
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(PROJECT_ID, 100, 1, 1, 2, 3, 60, 1, 0, 20260715, 0, 0, "all", "model-gpt", '["model-gpt"]', 1, 1, 1),
+        .bind(PROJECT_ID, 100, 1, 1, 2, 3, 180, 1, 0, 20260715, 0, 0, "all", "model-gpt", '["model-gpt"]', 1, 1, 1),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind("model-gpt", PROJECT_ID, "OpenAI", "GPT", "gpt-5.6", "https://api.openai.com/v1", "OpenAI Chat Completions", 2048, 1, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -103,7 +112,7 @@ async function ensureSchema() {
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind("model-doubao", PROJECT_ID, "ByteDance", "Doubao", "doubao-seed-2-1-pro-260628", "https://ark.cn-beijing.volces.com/api/v3", "OpenAI-compatible", 2048, 1, 1, 0, 1, 60, 1, "Not tested", null),
       db.prepare(`INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind("model-gemini", PROJECT_ID, "Google", "Gemini", "gemini-3.1-pro-preview", "https://generativelanguage.googleapis.com/v1beta/openai", "OpenAI-compatible", 2048, 1, 1, 0, 1, 8, 1, "Not tested", null),
+        .bind("model-gemini", PROJECT_ID, "Google", "Gemini", "gemini-3.1-pro-preview", "https://generativelanguage.googleapis.com/v1beta", "Gemini native generateContent", 2048, 1, 1, 0, 1, 8, 1, "Not tested", null),
     ]);
   }
   await db.prepare(`UPDATE model_configs
@@ -119,6 +128,21 @@ async function ensureSchema() {
     WHERE id = 'model-gemini'
       AND model_id = 'gemini-3.1-pro-preview'
       AND max_tokens < 2048`).run();
+
+  const geminiNativeMigrationId = "gemini-native-generate-content-v1";
+  const geminiNativeMigrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")
+    .bind(geminiNativeMigrationId).first();
+  if (!geminiNativeMigrated) {
+    const migratedAt = new Date().toISOString();
+    await db.batch([
+      db.prepare(`UPDATE model_configs
+        SET base_url='https://generativelanguage.googleapis.com/v1beta',
+            api_format='Gemini native generateContent', last_test_status='Not tested', latency_ms=NULL
+        WHERE project_id=? AND model_id LIKE 'gemini-3%'`).bind(PROJECT_ID),
+      db.prepare("INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)")
+        .bind(geminiNativeMigrationId, migratedAt),
+    ]);
+  }
 
   const protocolMigrationId = "model-protocol-t1-p1-2048-low-reasoning-v1";
   const protocolMigrated = await db.prepare("SELECT id FROM app_migrations WHERE id = ?")

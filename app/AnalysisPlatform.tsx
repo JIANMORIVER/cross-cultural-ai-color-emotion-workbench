@@ -2,10 +2,16 @@
 
 import { useMemo, useRef, useState } from "react";
 import { BidirectionalVisualLab } from "./analysis/BidirectionalVisualLab";
-import { elementToPngBlob } from "./analysis/export-png";
+import { Task1Insights, Task2Insights } from "./analysis/DashboardInsights";
+import { renderPublicationFigure } from "./analysis/python-figures";
 import { buildInteractiveHtmlReport } from "./analysis/html-report";
 import { Task1VisualLab } from "./analysis/Task1VisualLab";
+import { Task1SimilarityLab } from "./analysis/Task1SimilarityLab";
+import { ContinuousDistanceLab } from "./analysis/ContinuousDistanceLab";
 import { Task2VisualLab } from "./analysis/Task2VisualLab";
+import { LatentSpaceLab } from "./analysis/LatentSpaceLab";
+import { MachineLearningLab } from "./analysis/MachineLearningLab";
+import { normalizeFigureSources, orderFigureRows, readFigurePairingMode, readFigureSourceSelection } from "./analysis/FigureSourceSelector";
 import {
   colorRowsToExport,
   detectDataset,
@@ -16,9 +22,11 @@ import {
   runBidirectionalConsistency,
   runBidirectionalGroupComparison,
   runColorClustering,
+  runContinuousHueEntropy,
   runColorDiversity,
   runCulturalBias,
   runColorSummary,
+  runRepresentativeColors,
   runDeltaE,
   runGewConcentration,
   runGewCompositeIndicators,
@@ -61,13 +69,15 @@ type ExperimentGroup = {
 };
 type RunStatus = "idle" | "running" | "completed" | "error";
 type TaskRun = { status: RunStatus; result?: AnalysisResult; error?: string };
-type WorkspaceTab = "import" | "tasks" | "dashboard";
+type WorkspaceTab = "import" | "tasks" | "dashboard" | "machine-learning";
 type AnalysisScope = "combined" | "active";
+type PairingMode = "all" | "cross-cohort";
 type AnalysisConfig = {
   kind: "chromalab-analysis-config";
-  version: 1;
+  version: 2;
   exportedAt: string;
   analysisScope: AnalysisScope;
+  comparison?: { sources: string[]; pairingMode?: PairingMode };
   groups: Array<{
     fileName: string;
     label: string;
@@ -90,11 +100,14 @@ type ColumnRecommendation = {
 
 const TASKS = [
   { id: "task1-normalize", group: "实验一", title: "色彩格式标准化", description: "宽表转长表，并将 HEX、RGB、HSL、HSV 或 Lab 统一到五种标准色彩表示。", output: "标准长表", space: "输入格式 → sRGB D65 → HSL / HSV / CIELAB" },
-  { id: "task1-summary", group: "实验一", title: "来源 × 情绪描述统计", description: "汇总每个来源与情绪的样本量、平均色彩、亮度与饱和度。", output: "描述统计", space: "HSL + CIELAB D65" },
-  { id: "task1-hsv", group: "实验一", title: "HSV 分布与 H–S / V–S 图", description: "由 RGB 转换 HSV，生成按来源分面的 H–S 极坐标和 V–S 密度散点数据。", output: "HSV 长表 + 图表", space: "sRGB → HSV（H°，S/V 0–1）" },
-  { id: "task1-cluster", group: "实验一", title: "最佳 K 与 Lab 聚类", description: "按历史脚本在 Lab 空间搜索 K=2–5，以轮廓系数选择最佳聚类并输出中心色与权重；少于 5 个样本的组合跳过。", output: "聚类中心", space: "CIELAB D65" },
+  { id: "task1-continuous-lab", group: "实验一", title: "01 CIELAB 连续颜色分布", description: "保留每条自由选色的连续 L*a*b* 坐标；主图显示原始 a*–b* 散点，不使用颜色名称或平均颜色。", output: "连续 CIELAB 长表", space: "CIELAB D65" },
+  { id: "task1-hsv", group: "实验一", title: "02 连续 Hue 分布", description: "由 RGB 转换 HSV，按连续 0–360° Hue 展示分布；无彩色样本单独处理。", output: "HSV 长表 + Hue 图", space: "sRGB → HSV（H°，S/V 0–1）" },
+  { id: "task1-representative", group: "实验一", title: "03 Representative Colors", description: "按来源×情绪在 CIELAB 中固定提取最多 3 个代表色与比例，仅用于解释性展示。", output: "代表色与比例", space: "CIELAB D65 · fixed K≤3" },
+  { id: "task1-entropy", group: "实验一", title: "04 Distribution Entropy", description: "用固定 36 个圆周分箱估计连续 Hue 分布熵，比较颜色选择的集中与分散程度。", output: "标准化色相熵", space: "HSV Hue · 36×10°" },
+  { id: "task1-summary", group: "实验一 · Supplement", title: "平均颜色描述（补充）", description: "汇总每个来源与情绪的样本量、平均色彩、亮度与饱和度；不作为主要结果。", output: "补充描述统计", space: "HSL + CIELAB D65" },
+  { id: "task1-cluster", group: "实验一 · Supplement", title: "自适应 K 聚类（补充）", description: "在 Lab 空间搜索 K=2–5，以轮廓系数选择聚类，仅作为补充探索。", output: "补充聚类中心", space: "CIELAB D65" },
   { id: "task1-within-delta", group: "实验一", title: "组内色差与选择一致性", description: "生成组内 ΔE 矩阵摘要，计算平均最近邻色差和全部样本对平均色差。", output: "组内一致性", space: "CIELAB D65 · ΔE76" },
-  { id: "task1-delta", group: "实验一", title: "跨来源 ΔE 色差", description: "按情绪计算来源之间的双向最近邻 CIE76 色差，刻画模型或文化偏差。", output: "色差矩阵", space: "CIELAB D65 · ΔE76" },
+  { id: "task1-delta", group: "实验一 · Supplement", title: "跨来源对称最近邻 ΔE（补充）", description: "按情绪计算来源色点集之间的双向最近邻 CIE76（Chamfer 型）距离；不等于均值色差或完整分布距离。", output: "支持集邻近度矩阵", space: "CIELAB D65 · symmetric nearest-neighbour ΔE76" },
   { id: "task1-bias", group: "实验一", title: "跨文化引力与偏置指数", description: "以任意两个来源为参照，计算其他来源在每个情绪上的文化偏置方向与强度。", output: "偏置指数", space: "CIELAB D65 · ΔE76" },
   { id: "task1-diversity", group: "实验一 · 扩展", title: "色相多样性与色域离散", description: "用圆周统计、色相熵、有效色相数与 Lab 质心半径检验色彩是否集中或刻板。", output: "多样性指标", space: "HSV 圆周统计 + CIELAB D65" },
   { id: "task1-hue-jsd", group: "实验一 · 扩展", title: "色相分布来源距离", description: "将色相划分为 12 个圆周区间，计算来源两两 Jensen–Shannon 距离。", output: "色相距离矩阵", space: "HSV H · 12-bin JSD" },
@@ -135,16 +148,65 @@ function rangeRows(group?: ExperimentGroup) {
     .map((row, index) => ({ row, rowNumber: group.rowStart + index }));
 }
 
+const PARTICIPANT_ID_COLUMNS = new Set([
+  "participant", "participant_id", "sample_id", "id", "trial_id", "objectid", "object_id", "实验id", "样本id",
+]);
+const RUN_ID_COLUMNS = new Set(["run", "run_id", "run_index", "repetition", "轮次", "重复轮次"]);
+
+function normalizedIdentityColumn(column: string) {
+  return column.trim().toLowerCase().replaceAll("－", "-");
+}
+
+function hasCellValue(value: DataRow[string]) {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
+
+function firstIdentityValue(row: DataRow, columns: string[], aliases: Set<string>) {
+  const column = columns.find(item => aliases.has(normalizedIdentityColumn(item)) && hasCellValue(row[item]));
+  return column ? String(row[column]).trim() : "";
+}
+
+function completeTask1EmotionCount(row: DataRow, columns: string[]) {
+  const channels = new Map<string, Set<string>>();
+  columns.forEach(column => {
+    const match = column.match(/^color_data\.(.+)\.(h|s|l|hex)$/i);
+    if (!match || !hasCellValue(row[column])) return;
+    const emotion = match[1];
+    if (!channels.has(emotion)) channels.set(emotion, new Set());
+    channels.get(emotion)!.add(match[2].toLowerCase());
+  });
+  return [...channels.values()].filter(items => items.has("hex") || ["h", "s", "l"].every(channel => items.has(channel))).length;
+}
+
 function configuredRows(group?: ExperimentGroup) {
   if (!group) return [];
+  const sheet = group.sheets.find(item => item.name === group.sheetName);
+  if (!sheet) return [];
   const excluded = new Set(group.excludedRows);
   return rangeRows(group)
     .filter(item => !excluded.has(item.rowNumber))
-    .map(({ row }) => ({
-      ...Object.fromEntries(group.selectedColumns.map(column => [column, row[column]])),
-      _analysis_group: group.label,
-      _analysis_cohort: group.cohort,
-    }) as DataRow);
+    .map(({ row, rowNumber }) => {
+      const identityColumns = sheet.columns.filter(column => {
+        const normalized = normalizedIdentityColumn(column);
+        return PARTICIPANT_ID_COLUMNS.has(normalized) || RUN_ID_COLUMNS.has(normalized);
+      });
+      const participant = firstIdentityValue(row, identityColumns, PARTICIPANT_ID_COLUMNS);
+      const originalRun = firstIdentityValue(row, identityColumns, RUN_ID_COLUMNS);
+      const isCompleteWideRun = completeTask1EmotionCount(row, sheet.columns) >= 20;
+      const generatedRun = group.cohort === "ai" && !participant && !originalRun && isCompleteWideRun
+        ? `auto:${group.label}:${group.fileName}:${group.sheetName}:row-${rowNumber}`
+        : "";
+      const identityOrigin = participant || originalRun ? "original" : generatedRun ? "generated-wide-row" : "missing";
+      return {
+        ...Object.fromEntries(group.selectedColumns.map(column => [column, row[column]])),
+        ...Object.fromEntries(identityColumns.map(column => [column, row[column]])),
+        _analysis_group: group.label,
+        _analysis_cohort: group.cohort,
+        _analysis_source_row: rowNumber,
+        ...(generatedRun ? { _analysis_run_id: generatedRun } : {}),
+        _analysis_identity_origin: identityOrigin,
+      } as DataRow;
+    });
 }
 
 function safeFileName(value: string) {
@@ -231,12 +293,13 @@ function mergeDetections(items: Array<{ label: string; detection: Detection }>):
   };
 }
 
-function buildAnalysisConfig(groups: ExperimentGroup[], analysisScope: AnalysisScope): AnalysisConfig {
+function buildAnalysisConfig(groups: ExperimentGroup[], analysisScope: AnalysisScope, comparisonSources: string[], pairingMode: PairingMode): AnalysisConfig {
   return {
     kind: "chromalab-analysis-config",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     analysisScope,
+    comparison: { sources: comparisonSources, pairingMode },
     groups: groups.map(group => ({
       fileName: group.fileName,
       label: group.label,
@@ -249,6 +312,49 @@ function buildAnalysisConfig(groups: ExperimentGroup[], analysisScope: AnalysisS
       excludedRows: group.excludedRows,
     })),
   };
+}
+
+function orderBySource<T>(rows: T[], order: string[], sourceOf: (row: T) => string): T[] {
+  const rank = new Map(order.map((source, index) => [source, index]));
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    const aRank = rank.get(sourceOf(a.row)) ?? Number.MAX_SAFE_INTEGER;
+    const bRank = rank.get(sourceOf(b.row)) ?? Number.MAX_SAFE_INTEGER;
+    return aRank - bRank || a.index - b.index;
+  }).map(item => item.row);
+}
+
+function ComparisonFigureControl({
+  availableSources,
+  selectedSources,
+  pairingMode,
+  onToggle,
+  onMove,
+  onPairingModeChange,
+}: {
+  availableSources: string[];
+  selectedSources: string[];
+  pairingMode: PairingMode;
+  onToggle: (source: string) => void;
+  onMove: (source: string, direction: -1 | 1) => void;
+  onPairingModeChange: (mode: PairingMode) => void;
+}) {
+  return <section className="comparison-figure-control panel">
+    <div className="comparison-figure-copy"><span className="eyebrow">COMPARISON FIGURE SCOPE</span><h3>比较图显示与排序</h3><p>勾选决定纳入哪些来源；上下调整决定分面、图例和矩阵的显示顺序。此设置会同时作用于分析、交互报告、PNG/SVG 与归档导出，不会改写原始工作簿。</p></div>
+    <div className="comparison-source-list">
+      {availableSources.map((source, index) => {
+        const selectedIndex = selectedSources.indexOf(source);
+        const selected = selectedIndex >= 0;
+        return <div key={source} className={selected ? "selected" : ""}>
+          <label><input type="checkbox" checked={selected} onChange={() => onToggle(source)} /><span>{source}</span></label>
+          <span className="comparison-position">{selected ? String(selectedIndex + 1).padStart(2, "0") : "—"}</span>
+          <button type="button" aria-label={`上移 ${source}`} disabled={!selected || selectedIndex === 0} onClick={() => onMove(source, -1)}>↑</button>
+          <button type="button" aria-label={`下移 ${source}`} disabled={!selected || selectedIndex === selectedSources.length - 1} onClick={() => onMove(source, 1)}>↓</button>
+        </div>;
+      })}
+    </div>
+    <div className="comparison-pairing"><span>组对范围</span><button type="button" className={pairingMode === "all" ? "active" : ""} onClick={() => onPairingModeChange("all")}>全部组对</button><button type="button" className={pairingMode === "cross-cohort" ? "active" : ""} onClick={() => onPairingModeChange("cross-cohort")}>仅人类–AI 组对</button><small>{pairingMode === "cross-cohort" ? "已取消人类–人类及 AI–AI 比较；单来源描述图仍完整保留。" : "包含人类–人类、AI–AI 与人类–AI 的全部两两比较。"}</small></div>
+    <div className="comparison-figure-foot"><b>当前纳入 {selectedSources.length} / {availableSources.length} 个来源</b><span>修改后请重新运行需要保留的统计结果；图表导出将直接采用当前顺序。</span></div>
+  </section>;
 }
 
 function applyAnalysisConfig(loaded: ExperimentGroup[], config: AnalysisConfig) {
@@ -293,11 +399,15 @@ export function AnalysisPlatform() {
   const [loadingFile, setLoadingFile] = useState(false);
   const [fileError, setFileError] = useState("");
   const [runs, setRuns] = useState<Record<string, TaskRun>>({});
-  const [dashboardMode, setDashboardMode] = useState<"task1" | "task2" | "bidirectional">("task1");
+  const [dashboardMode, setDashboardMode] = useState<"task1" | "task2" | "bidirectional" | "latent">("task1");
   const [sourceFilter, setSourceFilter] = useState("全部来源");
   const [emotionFilter, setEmotionFilter] = useState("全部情绪");
   const [colorFilter, setColorFilter] = useState("全部颜色");
   const [publicationExporting, setPublicationExporting] = useState(false);
+  // null means “all available sources”.  Once the user changes a checkbox,
+  // this array becomes both the inclusion set and the explicit display order.
+  const [comparisonSources, setComparisonSources] = useState<string[] | null>(null);
+  const [pairingMode, setPairingMode] = useState<PairingMode>("all");
 
   const activeGroup = groups.find(group => group.id === activeGroupId) || groups[0];
   const sheet = activeGroup?.sheets.find(item => item.name === activeGroup.sheetName);
@@ -325,7 +435,7 @@ export function AnalysisPlatform() {
     : "";
   const parsedGroups = useMemo(() => analysisGroups.map(group => {
     const rows = configuredRows(group);
-    const parseColumns = ["_analysis_group", "_analysis_cohort", ...group.selectedColumns];
+    const parseColumns = [...new Set(["_analysis_group", "_analysis_cohort", ...group.selectedColumns, ...Object.keys(rows[0] || {})])];
     const detection = detectDataset(rows, parseColumns);
     return {
       group,
@@ -336,25 +446,41 @@ export function AnalysisPlatform() {
     };
   }), [analysisGroups]);
   const detection = useMemo(() => mergeDetections(parsedGroups.map(item => ({ label: item.group.label, detection: item.detection }))), [parsedGroups]);
-  const colorData = useMemo(() => ({
+  const baseColorData = useMemo(() => ({
     rows: parsedGroups.flatMap(item => item.colors.rows),
     rejected: parsedGroups.reduce((sum, item) => sum + item.colors.rejected, 0),
   }), [parsedGroups]);
-  const gewData = useMemo(() => ({
+  const baseGewData = useMemo(() => ({
     rows: parsedGroups.flatMap(item => item.gew.rows),
     sourceRows: parsedGroups.reduce((sum, item) => sum + item.gew.sourceRows, 0),
     invalidCells: parsedGroups.reduce((sum, item) => sum + item.gew.invalidCells, 0),
   }), [parsedGroups]);
+  const availableComparisonSources = useMemo(() => [...new Set([...baseColorData.rows.map(row => row.source), ...baseGewData.rows.map(row => row.source)])].filter(Boolean), [baseColorData.rows, baseGewData.rows]);
+  const selectedComparisonSources = useMemo(() => comparisonSources === null ? availableComparisonSources : comparisonSources.filter(source => availableComparisonSources.includes(source)), [comparisonSources, availableComparisonSources]);
+  const comparisonSet = useMemo(() => new Set(selectedComparisonSources), [selectedComparisonSources]);
+  const sourceCohorts = useMemo(() => new Map([...baseColorData.rows.map(row => [row.source, row.cohort] as const), ...baseGewData.rows.map(row => [row.source, row.cohort] as const)]), [baseColorData.rows, baseGewData.rows]);
+  const colorData = useMemo(() => ({
+    rows: orderBySource(baseColorData.rows.filter(row => comparisonSet.has(row.source)), selectedComparisonSources, row => row.source),
+    rejected: baseColorData.rejected,
+  }), [baseColorData, comparisonSet, selectedComparisonSources]);
+  const gewData = useMemo(() => ({
+    rows: orderBySource(baseGewData.rows.filter(row => comparisonSet.has(row.source)), selectedComparisonSources, row => row.source),
+    sourceRows: baseGewData.sourceRows,
+    invalidCells: baseGewData.invalidCells,
+  }), [baseGewData, comparisonSet, selectedComparisonSources]);
   const gewDescription = useMemo(() => runGewDescriptive(gewData.rows).rows, [gewData.rows]);
-  const bidirectionalData = useMemo(() => runBidirectionalConsistency(colorData.rows, gewData.rows), [colorData.rows, gewData.rows]);
+  const bidirectionalData = useMemo(() => {
+    const result = runBidirectionalConsistency(colorData.rows, gewData.rows);
+    return { ...result, rows: orderBySource(result.rows, selectedComparisonSources, row => String(row["来源"] || "")) };
+  }, [colorData.rows, gewData.rows, selectedComparisonSources]);
   const activeColumnRecommendation = useMemo(() => sheet ? columnRecommendation(sheet.rows, sheet.columns) : null, [sheet]);
 
-  const sources = useMemo(() => [...new Set(dashboardMode === "task1"
+  const sources = useMemo(() => [...new Set(dashboardMode === "task1" || dashboardMode === "latent" || dashboardMode === "bidirectional"
     ? colorData.rows.map(row => row.source)
     : dashboardMode === "task2"
       ? gewData.rows.map(row => row.source)
       : bidirectionalData.rows.map(row => String(row["来源"] || "")))].filter(Boolean), [dashboardMode, colorData.rows, gewData.rows, bidirectionalData.rows]);
-  const emotions = useMemo(() => [...new Set(dashboardMode === "task1"
+  const emotions = useMemo(() => [...new Set(dashboardMode === "task1" || dashboardMode === "latent" || dashboardMode === "bidirectional"
     ? colorData.rows.map(row => row.emotion)
     : dashboardMode === "task2"
       ? gewData.rows.map(row => row.emotion)
@@ -364,6 +490,48 @@ export function AnalysisPlatform() {
   const dashboardGew = gewDescription.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter) && (colorFilter === "全部颜色" || row["颜色"] === colorFilter));
   const dashboardGewRaw = gewData.rows.filter(row => (sourceFilter === "全部来源" || row.source === sourceFilter) && (colorFilter === "全部颜色" || row.color === colorFilter));
   const dashboardBidirectional = bidirectionalData.rows.filter(row => (sourceFilter === "全部来源" || row["来源"] === sourceFilter) && (emotionFilter === "全部情绪" || row["情绪"] === emotionFilter));
+
+  function updateComparisonSources(next: string[]) {
+    setComparisonSources(next);
+    setRuns({});
+    if (sourceFilter !== "全部来源" && !next.includes(sourceFilter)) setSourceFilter("全部来源");
+    setConfigNotice("比较图范围与来源顺序已更新：后续分析、交互报告、PNG/SVG 和归档将采用这份配置。已清除旧统计结果，请按需重新运行分析。");
+  }
+
+  function toggleComparisonSource(source: string) {
+    const current = comparisonSources === null ? availableComparisonSources : selectedComparisonSources;
+    updateComparisonSources(current.includes(source) ? current.filter(item => item !== source) : [...current, source]);
+  }
+
+  function moveComparisonSource(source: string, direction: -1 | 1) {
+    const current = comparisonSources === null ? [...availableComparisonSources] : [...selectedComparisonSources];
+    const index = current.indexOf(source), target = index + direction;
+    if (index < 0 || target < 0 || target >= current.length) return;
+    [current[index], current[target]] = [current[target], current[index]];
+    updateComparisonSources(current);
+  }
+
+  function updatePairingMode(mode: PairingMode) {
+    setPairingMode(mode);
+    setRuns({});
+    setConfigNotice(mode === "cross-cohort" ? "已启用仅人类–AI 跨组比较：人类内部和 AI 内部的组对将从两两比较结果与矩阵中排除。单来源描述图保持不变。" : "已恢复全部组对比较。已清除旧统计结果，请按需重新运行分析。");
+  }
+
+  function includePair(sourceA: string, sourceB: string) {
+    if (pairingMode === "all" || !sourceA || !sourceB) return true;
+    const cohortA = sourceCohorts.get(sourceA), cohortB = sourceCohorts.get(sourceB);
+    return !(cohortA && cohortA === cohortB && (cohortA === "human" || cohortA === "ai"));
+  }
+
+  function applyPairingMode(result: AnalysisResult): AnalysisResult {
+    // A source profile (for example Color–Emotion Analysis) is not a source
+    // pair.  Restrict this policy to outputs that genuinely contain A/B
+    // comparisons; otherwise the button appears to alter unrelated figures.
+    const pairwiseTaskIds = new Set(["task1-delta", "task1-bias", "task1-hue-jsd", "task1-human-ai", "task1-cohort-test", "task2-pairwise", "task2-jsd", "task2-pattern", "task2-human-ai", "task2-cohort-test", "task-cross-groups"]);
+    if (pairingMode === "all" || !pairwiseTaskIds.has(result.id)) return result;
+    const rows = result.rows.filter(row => includePair(String(row["来源A"] ?? row.sourceA ?? ""), String(row["来源B"] ?? row.sourceB ?? "")));
+    return { ...result, rows, summary: [...result.summary, { label: "组对范围", value: "仅人类–AI" }] };
+  }
 
   async function loadFiles(fileList?: FileList | File[]) {
     const files = Array.from(fileList || []);
@@ -512,7 +680,7 @@ export function AnalysisPlatform() {
   }
 
   function exportConfig() {
-    const config = buildAnalysisConfig(groups, analysisScope);
+    const config = buildAnalysisConfig(groups, analysisScope, selectedComparisonSources, pairingMode);
     download(`${safeFileName(fileName || "chromalab")}_analysis-config.json`, JSON.stringify(config, null, 2), "application/json;charset=utf-8");
   }
 
@@ -520,12 +688,15 @@ export function AnalysisPlatform() {
     if (!file) return;
     try {
       const raw = JSON.parse(await file.text()) as Partial<AnalysisConfig>;
-      if (raw.kind !== "chromalab-analysis-config" || raw.version !== 1 || !Array.isArray(raw.groups)) throw new Error("不是有效的 Chromalab v1 分析配置。");
+      if (raw.kind !== "chromalab-analysis-config" || (raw.version !== 1 && raw.version !== 2) || !Array.isArray(raw.groups)) throw new Error("不是有效的 Chromalab 分析配置。");
+      const savedComparison = raw.comparison && Array.isArray(raw.comparison.sources) ? raw.comparison.sources.map(String) : null;
+      const savedPairingMode: PairingMode = raw.comparison?.pairingMode === "cross-cohort" ? "cross-cohort" : "all";
       const config: AnalysisConfig = {
         kind: "chromalab-analysis-config",
-        version: 1,
+        version: 2,
         exportedAt: typeof raw.exportedAt === "string" ? raw.exportedAt : new Date().toISOString(),
         analysisScope: raw.analysisScope === "active" ? "active" : "combined",
+        comparison: savedComparison ? { sources: savedComparison, pairingMode: savedPairingMode } : undefined,
         groups: raw.groups.filter(Boolean).map(saved => ({
           fileName: String(saved.fileName || ""),
           label: String(saved.label || saved.fileName || "实验组"),
@@ -547,6 +718,8 @@ export function AnalysisPlatform() {
         setAnalysisScope(config.analysisScope);
         setRuns({});
       }
+      setComparisonSources(savedComparison);
+      setPairingMode(savedPairingMode);
       if (missing.length || !groups.length) {
         setPendingConfig(config);
         setConfigNotice(`配置已读取。请导入原数据文件：${[...new Set(missing.length ? missing : config.groups.map(group => group.fileName))].join("、")}；文件到齐后会自动套用。`);
@@ -564,8 +737,14 @@ export function AnalysisPlatform() {
     if (id === "task1-normalize") {
       const mismatches = colorData.rows.filter(row => row.consistencyDeltaE !== null && row.consistencyDeltaE > 2.3).length;
       const inputFormats = [...new Set(colorData.rows.map(row => row.inputFormat))];
-      result = resultFromRows(id, "色彩格式标准化", colorRowsToExport(colorData.rows), [{ label: "有效色彩", value: String(colorData.rows.length) }, { label: "拒绝值", value: String(colorData.rejected) }, { label: "多格式不一致", value: String(mismatches) }, { label: "权威输入格式", value: inputFormats.join(" + ") || "—" }], "历史宽表以 HSL 为权威输入：HSL → 浮点 sRGB(D65) → CIELAB/HSV；HEX 只做一致性核验。长表按 HSL、RGB、HEX、HSV、Lab 的可用性选择单一权威路径。ΔE76 > 2.3 的多格式记录会被标记，但不会静默删除。");
+      const originalUnits = new Set(colorData.rows.filter(row => row.identitySource === "original").map(row => `${row.source}\u0000${row.participant || row.run}`)).size;
+      const generatedUnits = new Set(colorData.rows.filter(row => row.identitySource === "generated-wide-row").map(row => `${row.source}\u0000${row.run}`)).size;
+      const missingIdentitySources = [...new Set(colorData.rows.filter(row => !row.identityProvided).map(row => row.source))];
+      result = resultFromRows(id, "色彩格式标准化", colorRowsToExport(colorData.rows), [{ label: "有效色彩", value: String(colorData.rows.length) }, { label: "原始身份单元", value: String(originalUnits) }, { label: "自动 AI run", value: String(generatedUnits) }, { label: "身份缺失来源", value: missingIdentitySources.join("、") || "0" }, { label: "拒绝值", value: String(colorData.rejected) }, { label: "多格式不一致", value: String(mismatches) }, { label: "权威输入格式", value: inputFormats.join(" + ") || "—" }], "Human 优先保留原始 participant/objectId；对一行包含完整20情绪的 AI 宽表，按来源文件、工作表和原始行号生成稳定 run_id。历史宽表以 HSL 为权威输入：HSL → 浮点 sRGB(D65) → CIELAB/HSV；HEX 只做一致性核验。长表按 HSL、RGB、HEX、HSV、Lab 的可用性选择单一权威路径。ΔE76 > 2.3 的多格式记录会被标记，但不会静默删除。");
     }
+    else if (id === "task1-continuous-lab") result = resultFromRows(id, "CIELAB 连续颜色分布", colorRowsToExport(colorData.rows), [{ label: "原始颜色点", value: String(colorData.rows.length) }, { label: "来源", value: String(new Set(colorData.rows.map(row => row.source)).size) }, { label: "主分析空间", value: "CIELAB D65" }], "每一行保留一个原始自由选色。主分析不先映射到颜色名称，不计算平均颜色，也不以聚类替代连续分布。");
+    else if (id === "task1-representative") result = runRepresentativeColors(colorData.rows, 3);
+    else if (id === "task1-entropy") result = runContinuousHueEntropy(colorData.rows, 36);
     else if (id === "task1-summary") result = runColorSummary(colorData.rows, colorData.rejected);
     else if (id === "task1-hsv") result = runHsvDistribution(colorData.rows);
     else if (id === "task1-cluster") result = runColorClustering(colorData.rows);
@@ -589,7 +768,8 @@ export function AnalysisPlatform() {
     else if (id === "task2-cohort-test") result = runHumanAiGewCohortTest(gewData.rows);
     else if (id === "task-cross-groups") result = runBidirectionalGroupComparison(bidirectionalData.rows);
     else result = bidirectionalData;
-    if (!result.rows.length) throw new Error("当前选择范围没有产生有效结果，请检查字段和行列范围。");
+    result = applyPairingMode(result);
+    if (!result.rows.length) throw new Error(pairingMode === "cross-cohort" ? "当前仅人类–AI 组对范围没有产生有效结果，请检查组类型标记。" : "当前选择范围没有产生有效结果，请检查字段和行列范围。");
     return result;
   }
 
@@ -721,6 +901,7 @@ export function AnalysisPlatform() {
         source: sourceFilter,
         emotion: emotionFilter,
         color: colorFilter,
+        comparisonSources: selectedComparisonSources,
       },
     });
     download(`${safeFileName(fileName || "chromalab")}_交互式数据报告.html`, html, "text/html;charset=utf-8");
@@ -732,128 +913,65 @@ export function AnalysisPlatform() {
   async function exportPublicationFigures() {
     if (!analysisGroups.length || publicationExporting) return;
     setPublicationExporting(true);
-    setConfigNotice("正在准备论文标准图表，请保持当前页面开启…");
+    setConfigNotice("正在用 Matplotlib 生成 PNG + SVG 科研图表…");
 
-    const waitForPaint = () => new Promise<void>(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
-    const files: Record<string, Uint8Array> = {};
-    const manifest: ExportRow[] = [];
-    const counters = { A: 0, B: 0, C: 0 };
-    let completed = 0;
-    let failed = 0;
-    let firstCaptureError = "";
-
+    // Native figure pipeline.  No DOM clone, browser screenshot or canvas is
+    // involved: each payload is rendered by the local Matplotlib service.
     try {
-      await waitForPaint();
-      const stage = document.getElementById("publication-export-stage");
-      if (!stage) throw new Error("图表导出区未能完成加载，请重试。");
-
-      const capture = async (group: keyof typeof counters, module: string, title: string, element?: HTMLElement | null) => {
-        counters[group] += 1;
-        const figureId = `${group}${String(counters[group]).padStart(2, "0")}`;
-        const file = `${group === "A" ? "实验一_词选色" : group === "B" ? "实验二_情绪轮" : "双向整合"}/${figureId}_${safeFileName(title)}.png`;
-        if (!element) {
-          failed += 1;
-          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "未生成", 文件: "", 说明: "当前数据没有对应的可绘制结果。" });
-          return;
-        }
-        try {
-          const blob = await elementToPngBlob(element, {
-            minimumWidth: 1_200,
-            minimumHeight: 720,
-            background: "#ffffff",
-            publicationMode: true,
-          });
-          files[`figures/${file}`] = new Uint8Array(await blob.arrayBuffer());
-          completed += 1;
-          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "已生成", 文件: `figures/${file}`, 说明: "白底高分辨率 PNG；交互控件已冻结为当前参数。" });
-          setConfigNotice(`正在生成论文图表：已完成 ${completed} 张 · ${figureId} ${title}`);
-        } catch (error) {
-          failed += 1;
-          const message = error instanceof Error ? error.message : "未知错误";
-          if (!firstCaptureError) firstCaptureError = `${figureId} ${title}：${message}`;
-          manifest.push({ 图号: figureId, 模块: module, 图表: title, 状态: "生成失败", 文件: "", 说明: message });
-        }
-        await new Promise(resolve => window.setTimeout(resolve, 0));
-      };
-
-      const task1Root = stage.querySelector<HTMLElement>('[data-publication-group="task1"]');
-      const task1Select = task1Root?.querySelector<HTMLSelectElement>(".visual-lab-controls select");
-      if (task1Root && task1Select) {
-        const charts = Array.from(task1Select.options).map(option => ({ value: option.value, label: option.text }));
-        for (const chart of charts) {
-          const select = task1Root.querySelector<HTMLSelectElement>(".visual-lab-controls select");
-          if (!select) continue;
-          select.value = chart.value;
-          select.dispatchEvent(new Event("change", { bubbles: true }));
-          await waitForPaint();
-          await capture("A", "实验一 · 词选色", chart.label, task1Root.querySelector<HTMLElement>(".visual-stage"));
-        }
-      }
-
-      const task2Root = stage.querySelector<HTMLElement>('[data-publication-group="task2"]');
-      if (task2Root) {
-        const blocks = Array.from(task2Root.querySelectorAll<HTMLElement>(".gew-view-block"));
-        for (const block of blocks) {
-          const title = block.querySelector("h4")?.textContent?.trim() || "实验二分析图";
-          await capture("B", "实验二 · 情绪轮", title, block);
-        }
-        const dotsButton = Array.from(task2Root.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.includes("气泡点阵"));
-        if (dotsButton) {
-          dotsButton.click();
-          await waitForPaint();
-          const dotBlock = Array.from(task2Root.querySelectorAll<HTMLElement>(".gew-view-block")).find(block => block.querySelector("h4")?.textContent?.includes("气泡点阵"));
-          await capture("B", "实验二 · 情绪轮", "各来源颜色—情绪气泡点阵", dotBlock);
-        }
-      }
-
-      const bidirectionalRoot = stage.querySelector<HTMLElement>('[data-publication-group="bidirectional"]');
-      if (bidirectionalRoot) {
-        const views = Array.from(bidirectionalRoot.querySelectorAll<HTMLButtonElement>(".visual-tabs button")).map(button => button.textContent?.trim() || "双向分析图");
-        for (const title of views) {
-          const button = Array.from(bidirectionalRoot.querySelectorAll<HTMLButtonElement>(".visual-tabs button")).find(item => item.textContent?.trim() === title);
-          button?.click();
-          await waitForPaint();
-          await capture("C", "双向整合", title, bidirectionalRoot.querySelector<HTMLElement>(".bidirectional-canvas"));
-        }
-      }
-
-      if (!completed) throw new Error(firstCaptureError ? `所有图表生成失败；首个错误为 ${firstCaptureError}` : "当前范围没有可导出的分析图表。");
       const { zipSync, strToU8 } = await import("fflate");
+      const files: Record<string, Uint8Array> = {};
+      const manifest: ExportRow[] = [];
+      const jobs = [
+        ...["continuous-lab", "hue-histogram", "representative-palette", "distribution-entropy", "hs-polar", "vs-density", "lab-ab-density", "lab-distribution", "mosaic", "cluster-strip", "within-delta", "delta-heatmap", "delta-box", "delta-mean", "radar", "dumbbell", "parity", "bias-bars", "rank-heatmap", "difficulty-heatmap", "gravity", "slopegraph", "bias-density"].map(kind => ({ scope: "task1" as const, kind, title: `Task1 ${kind}`, rows: colorData.rows, cells: [] as unknown[] })),
+        ...["01", "02", "03", "04", "05", "06", "07", "08", "09"].map(index => ({ scope: "task2" as const, kind: `task2-${index}`, title: `Task2 ${index}`, rows: [] as unknown[], cells: gewDescription as unknown[] })),
+      ];
+      let completed = 0;
+      for (const job of jobs) {
+        try {
+          const figureKey = job.scope === "task1" ? `task1:${job.kind}` : job.scope === "task2" ? `task2:${job.kind.replace("task2-", "")}` : `bidirectional:${job.kind}`;
+          const figureSources = normalizeFigureSources(selectedComparisonSources, readFigureSourceSelection(figureKey));
+          const figurePairingMode = readFigurePairingMode(figureKey) || pairingMode;
+          const sourceOf = (row: unknown) => {
+            const item = row as Record<string, unknown>;
+            return String(item.source ?? item["来源"] ?? "");
+          };
+          const figureRows = orderFigureRows(job.rows, figureSources, sourceOf);
+          const figureCells = orderFigureRows(job.cells, figureSources, sourceOf);
+          const figureData = job.scope === "task1" && job.kind === "representative-palette"
+            ? runRepresentativeColors(figureRows, 3).rows
+            : job.scope === "task1" && job.kind === "distribution-entropy"
+              ? runContinuousHueEntropy(figureRows, 36).rows
+              : [];
+          for (const format of ["png", "svg"] as const) {
+            const blob = await renderPublicationFigure({ scope: job.scope, kind: job.kind, rows: figureRows, data: figureData, cells: figureCells, options: { columns: 4, width: 4500, scale: 3, showTitle: true, format, title: job.title, sourceOrder: figureSources, pairingMode: figurePairingMode } });
+            files[`figures/${job.scope}/${safeFileName(job.kind)}.${format}`] = new Uint8Array(await blob.arrayBuffer());
+          }
+          completed += 1;
+          manifest.push({ 图表: job.title, 状态: "已生成", 格式: "PNG 300 dpi + SVG", 说明: "由独立 Matplotlib Figure 生成；不含网页 UI。" });
+          setConfigNotice(`正在生成科研图表：${completed}/${jobs.length} 组`);
+        } catch (error) {
+          manifest.push({ 图表: job.title, 状态: "失败", 格式: "", 说明: error instanceof Error ? error.message : "未知错误" });
+        }
+      }
       files["图表目录.csv"] = strToU8(toCsv(manifest));
-      files["README_论文插图说明.txt"] = strToU8([
-        "Chromalab 论文标准图表归档",
-        `生成时间：${new Date().toISOString()}`,
-        `分析范围：${analysisScope === "combined" ? "合并已启用实验组" : activeGroup?.label || "当前实验组"}`,
-        `实验组：${analysisGroups.map(group => `${group.label}(${group.cohort})`).join("、")}`,
-        `成功图表：${completed} 张`,
-        `未生成或失败：${failed} 张`,
-        "",
-        "输出规范",
-        "- 单图独立 PNG，白色背景，至少 1200 px 版心并以 2× 像素密度渲染（受浏览器最大画布限制时自动安全缩放）。",
-        "- 图中交互下拉框已转换为静态参数标签；不包含网页按钮、API Key 或模型访问凭证。",
-        "- A/B/C 分别代表实验一、实验二和双向整合；图号可直接用于论文图注与补充材料索引。",
-        "- 参数化图表采用当前分析范围的默认来源、颜色、情绪或指标；具体值显示在图中或图表目录中。",
-        "- PNG 本身按像素保存；排版时可在 Word、LaTeX 或期刊系统中按目标尺寸设为 300 dpi。",
-        "",
-        "请结合图表目录.csv核对图号、标题、生成状态和文件位置。",
-      ].join("\n"));
-      downloadBlob(
-        `${safeFileName(fileName || "chromalab")}_全部论文图表PNG.zip`,
-        new Blob([zipSync(files, { level: 1 })], { type: "application/zip" }),
-      );
-      setConfigNotice(`论文图表归档已导出：${completed} 张 PNG${failed ? `，另有 ${failed} 张未生成并已写入目录` : "，全部成功"}。`);
+      files["README.txt"] = strToU8(`Chromalab publication figures\nAll files are generated as standalone Matplotlib figures. PNG uses 300 dpi; SVG keeps editable text and vector paths.\nComparison sources and display order: ${selectedComparisonSources.join(" → ") || "none"}\nPairing scope: ${pairingMode === "cross-cohort" ? "cross-cohort human–AI only" : "all pairs"}\n`);
+      downloadBlob(`${safeFileName(fileName || "chromalab")}_publication-figures_PNG_SVG.zip`, new Blob([zipSync(files, { level: 1 })], { type: "application/zip" }));
+      setConfigNotice(`科研图表归档已导出：${completed}/${jobs.length} 组（每组含 PNG 与 SVG）。`);
+      return;
     } catch (error) {
-      setConfigNotice(error instanceof Error ? `论文图表导出失败：${error.message}` : "论文图表导出失败。");
+      setConfigNotice(error instanceof Error ? `科研图表导出失败：${error.message}` : "科研图表导出失败。");
+      return;
     } finally {
       setPublicationExporting(false);
     }
+
   }
 
   async function exportArchive() {
     if (!analysisGroups.length) return;
     const [{ zipSync, strToU8 }, XLSX] = await Promise.all([import("fflate"), import("xlsx")]);
     const completed = Object.values(runs).flatMap(run => run.result ? [run.result] : []);
-    const config = buildAnalysisConfig(groups, analysisScope);
+    const config = buildAnalysisConfig(groups, analysisScope, selectedComparisonSources, pairingMode);
     const files: Record<string, Uint8Array> = {};
     const cleaningAudit: ExportRow[] = [];
     const columnAudit: ExportRow[] = [];
@@ -972,19 +1090,19 @@ export function AnalysisPlatform() {
     const archive = zipSync(files, { level: 6 });
     downloadBlob(`${safeFileName(fileName)}_Chromalab完整归档.zip`, new Blob([archive.slice().buffer as ArrayBuffer], { type: "application/zip" }));
   }
-  function resetDashboardFilters(mode: "task1" | "task2" | "bidirectional") { setDashboardMode(mode); setSourceFilter("全部来源"); setEmotionFilter("全部情绪"); setColorFilter("全部颜色"); }
+  function resetDashboardFilters(mode: "task1" | "task2" | "bidirectional" | "latent") { setDashboardMode(mode); setSourceFilter("全部来源"); setEmotionFilter("全部情绪"); setColorFilter("全部颜色"); }
 
   const selectedTaskCount = TASKS.filter(task => taskAvailable(task.id)).length;
   const completeCount = Object.values(runs).filter(run => run.status === "completed").length;
 
   return <>
     <div className="analysis-page-title">
-      <div><span className="eyebrow">步骤 07 / 07 · ANALYSIS WORKBENCH</span><h1>实验数据分析平台</h1><p>导入实验数据，确认字段与色彩格式，逐项运行可复现分析，并在筛选大屏中比较来源、情绪与颜色。</p></div>
+      <div><span className="eyebrow">3006 · CONTINUOUS INFERENCE V3</span><h1>实验数据分析平台 · 连续色彩推断分层版</h1><p>独立于 3005；分开报告 observed 距离、Human block permutation、Monte Carlo 稳定性与 legacy 诊断。</p></div>
       <div className="analysis-privacy"><span>⌁</span><p><b>浏览器本地分析</b><small>上传数据默认不离开当前设备</small></p></div>
     </div>
 
     <nav className="analysis-tabs" aria-label="分析工作区">
-      {([["import", "01", "数据导入"], ["tasks", "02", "分析任务"], ["dashboard", "03", "数据大屏"]] as const).map(([id, number, label]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><span>{number}</span><b>{label}</b>{id === "tasks" && completeCount ? <i>{completeCount}</i> : null}</button>)}
+      {([["import", "01", "数据导入"], ["tasks", "02", "分析任务"], ["dashboard", "03", "数据大屏"], ["machine-learning", "04", "机器学习 / 表征"]] as const).map(([id, number, label]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><span>{number}</span><b>{label}</b>{id === "tasks" && completeCount ? <i>{completeCount}</i> : null}</button>)}
     </nav>
 
     {tab === "import" ? <section className="analysis-import-layout">
@@ -1058,22 +1176,23 @@ export function AnalysisPlatform() {
 
     {tab === "tasks" ? <section className="analysis-task-workspace">
       <div className="analysis-status-strip batch"><div><span className="eyebrow">当前分析范围</span><b>{analysisScope === "combined" ? `${analysisGroups.length} 组实验合并比较` : activeGroup?.label || "尚未选择实验组"}</b><small>{detection.schemaLabel} · {selectedRows.length} 行 × {selectedColumns.length} 列</small></div><div><strong>{analysisGroups.length}</strong><span>个实验组</span></div><div><strong>{selectedTaskCount}</strong><span>项可运行</span></div><div><strong>{completeCount}</strong><span>项已完成</span></div><div className="analysis-batch-actions"><button className="secondary" onClick={() => setTab("import")}>调整数据范围</button><button className="primary" disabled={!selectedTaskCount || Object.values(runs).some(run => run.status === "running")} onClick={() => void Promise.all(TASKS.filter(task => taskAvailable(task.id)).map(task => runTask(task.id)))}>运行全部可用分析</button><button className="secondary" disabled={!completeCount} onClick={() => void exportAllResults()}>导出全部结果 XLSX ↓</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互 HTML ↓</button><button className="secondary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成图表…" : "全部论文图表 PNG.zip ↓"}</button><button className="secondary archive" disabled={!analysisGroups.length} onClick={() => void exportArchive()}>一键导出归档 ZIP ↓</button></div></div>
+      <ComparisonFigureControl availableSources={availableComparisonSources} selectedSources={selectedComparisonSources} pairingMode={pairingMode} onToggle={toggleComparisonSource} onMove={moveComparisonSource} onPairingModeChange={updatePairingMode} />
       <section className="color-pipeline-audit panel">
-        <div className="pipeline-title"><span className="eyebrow">词选色 · 色彩格式链路审计</span><h2>分析 1–7 使用固定、可追溯的转换路径</h2><p>已按历史 Bias_OriginalData.py 与 hsvplot.py 对齐，避免把 HSL 的 L 与 CIELAB 的 L* 混用。</p></div>
+        <div className="pipeline-title"><span className="eyebrow">词选色 · 连续颜色分析链路</span><h2>主分析保持连续颜色空间</h2><p>先呈现原始 CIELAB 与连续 Hue 分布，再用 KMeans 提取解释性代表色、用固定圆周分箱估计熵；均值色与 ΔE 归入 Supplement。</p></div>
         <div className="pipeline-flow"><div><span>原始宽表</span><b>HSL 为权威</b><small>H 0–360 · S/L 0–100<br />HEX 仅核验</small></div><i>→</i><div><span>统一底层</span><b>浮点 sRGB</b><small>D65 白点<br />Lab 前不舍入</small></div><i>→</i><div><span>图形分析</span><b>HSV</b><small>H–S / V–S<br />H° · S/V 0–1</small></div><i>+</i><div><span>统计分析</span><b>CIELAB</b><small>K-means / ΔE / 偏置<br />D65 · CIE76</small></div></div>
         <div className="pipeline-checks"><span>当前权威输入：{[...new Set(colorData.rows.map(row => row.inputFormat))].join(" + ") || "等待数据"}</span><span className={colorData.rows.some(row => row.consistencyDeltaE !== null && row.consistencyDeltaE > 2.3) ? "warn" : "pass"}>多格式 ΔE76 &gt; 2.3：{colorData.rows.filter(row => row.consistencyDeltaE !== null && row.consistencyDeltaE > 2.3).length}</span></div>
         <div className="pipeline-matrix">
-          <div><b>01 标准化</b><span>原始 HSL / HEX / RGB / HSV / Lab</span><i>→</i><strong>统一色彩长表</strong></div>
-          <div><b>02 描述</b><span>统一 HSL + Lab</span><i>→</i><strong>亮度、饱和度、质心</strong></div>
-          <div><b>03 H–S / V–S</b><span>统一浮点 sRGB</span><i>→</i><strong>HSV（H°，S/V 0–1）</strong></div>
-          <div><b>04 聚类</b><span>统一 CIELAB D65</span><i>→</i><strong>K=2–5 + 轮廓系数</strong></div>
+          <div><b>01 连续 CIELAB</b><span>每条原始自由选色</span><i>→</i><strong>a*–b* 原始散点</strong></div>
+          <div><b>02 连续 Hue</b><span>HSV H 0–360°</span><i>→</i><strong>圆周分布</strong></div>
+          <div><b>03 代表色</b><span>统一 CIELAB D65</span><i>→</i><strong>固定 K≤3 + 比例</strong></div>
+          <div><b>04 分布熵</b><span>36 × 10° 圆周分箱</span><i>→</i><strong>标准化 Hue 熵</strong></div>
           <div><b>05 组内一致性</b><span>统一 CIELAB D65</span><i>→</i><strong>ΔE76</strong></div>
           <div><b>06 跨来源色差</b><span>统一 CIELAB D65</span><i>→</i><strong>对称最近邻 ΔE76</strong></div>
           <div><b>07 文化偏置</b><span>第 06 项距离口径</span><i>→</i><strong>参照差值</strong></div>
         </div>
         <p className="pipeline-assurance">即使按 1 → 7 依次点击，每个单元也都从同一份未舍入的标准化内存数据读取，不会把上一项导出的 HSL、HSV 或 Lab 表再次误解析。</p>
       </section>
-      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "前 7 项延续历史脚本口径，另加分布、多样性、对齐与 4×4 来源级精确置换检验。" : group === "实验二" ? "以8个试验组为独立比较单位，覆盖全部28个组对；同时保留关联概率、条件强度、0–5分布、220维模式与Bootstrap区间。" : "同一组同时包含词选色和色选词时启用；8组独立展示并比较全部28个组对，人类/AI只作为标签，不在默认分析中合并。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
+      {(["实验一", "实验二", "双向整合"] as const).map(group => <section className="analysis-task-group" key={group}><div className="analysis-section-label"><span>{group === "实验一" ? "A" : group === "实验二" ? "B" : "C"}</span><div><h2>{group === "实验一" ? "词选色分析" : group === "实验二" ? "日内瓦情绪轮分析" : "双向关联整合"}</h2><p>{group === "实验一" ? "主分析依次为连续 CIELAB、连续 Hue、解释性代表色和分布熵；均值色、ΔE 与扩展模型保留在 Supplement，当前阶段不实现 EMD。" : group === "实验二" ? "以8个试验组为独立比较单位，覆盖全部28个组对；同时保留关联概率、条件强度、0–5分布、220维模式与Bootstrap区间。" : "同一组同时包含词选色和色选词时启用；8组独立展示并比较全部28个组对，人类/AI只作为标签，不在默认分析中合并。"}</p></div></div><div className="analysis-task-grid">{TASKS.filter(task => task.group.startsWith(group)).map((task, index) => {
         const available = taskAvailable(task.id), run = runs[task.id] || { status: "idle" as const };
         return <article key={task.id} className={`analysis-task-card ${available ? "available" : "disabled"} ${run.status}`}>
           <div className="task-card-top"><span>{String(index + 1).padStart(2, "0")}{task.group.includes("扩展") ? <small>扩展</small> : task.group.includes("推断") ? <small>推断</small> : task.group.includes("探索") ? <small>探索</small> : null}</span><em className={`run-state ${run.status}`}>{run.status === "running" ? "运行中" : run.status === "completed" ? "已完成" : run.status === "error" ? "需检查" : available ? "可运行" : "不适用"}</em></div>
@@ -1086,25 +1205,24 @@ export function AnalysisPlatform() {
     </section> : null}
 
     {tab === "dashboard" ? <section className="analysis-dashboard">
-      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><div className="dashboard-export-actions"><button className="secondary" disabled={dashboardMode === "task1" ? !dashboardColors.length : dashboardMode === "task2" ? !dashboardGew.length : !dashboardBidirectional.length} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" ? colorRowsToExport(dashboardColors) : dashboardMode === "task2" ? dashboardGew : dashboardBidirectional) as ExportRow[]))}>导出当前视图 CSV ↓</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互式 HTML ↓</button><button className="primary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成…" : "一键导出全部论文图表 ↓"}</button></div></div>
+      <div className="dashboard-hero"><div><span className="eyebrow">INTERACTIVE OVERVIEW</span><h2>情绪 × 色彩数据大屏</h2><p>筛选条件会同时作用于指标、图表和大屏导出；不会改动原始数据或分析任务结果。</p></div><div className="dashboard-export-actions"><button className="secondary" disabled={dashboardMode === "bidirectional" || (dashboardMode === "task1" || dashboardMode === "latent" ? !dashboardColors.length : dashboardMode === "task2" ? !dashboardGew.length : !dashboardBidirectional.length)} onClick={() => download(`${fileName || "dashboard"}_${dashboardMode}_filtered.csv`, toCsv((dashboardMode === "task1" || dashboardMode === "latent" ? colorRowsToExport(dashboardColors) : dashboardMode === "task2" ? dashboardGew : dashboardBidirectional) as ExportRow[]))}>导出当前视图 CSV ↓</button><button className="secondary" disabled={!analysisGroups.length} onClick={exportInteractiveReport}>导出交互式 HTML ↓</button><button className="primary" disabled={!analysisGroups.length || publicationExporting} onClick={() => void exportPublicationFigures()}>{publicationExporting ? "正在生成…" : "一键导出全部论文图表 ↓"}</button></div></div>
       <div className="dashboard-toolbar panel">
-        <div className="dashboard-mode"><button className={dashboardMode === "task1" ? "active" : ""} onClick={() => resetDashboardFilters("task1")}>实验一 · 词选色</button><button className={dashboardMode === "task2" ? "active" : ""} onClick={() => resetDashboardFilters("task2")}>实验二 · 情绪轮</button><button className={dashboardMode === "bidirectional" ? "active" : ""} onClick={() => resetDashboardFilters("bidirectional")}>双向整合 · 探索</button></div>
+        <div className="dashboard-mode"><button className={dashboardMode === "task1" ? "active" : ""} onClick={() => resetDashboardFilters("task1")}>实验一 · 词选色</button><button className={dashboardMode === "task2" ? "active" : ""} onClick={() => resetDashboardFilters("task2")}>实验二 · 情绪轮</button><button className={dashboardMode === "bidirectional" ? "active" : ""} onClick={() => resetDashboardFilters("bidirectional")}>05 双向颜色—情绪探索</button><button className={dashboardMode === "latent" ? "active" : ""} onClick={() => resetDashboardFilters("latent")}>潜在认知空间</button></div>
         <label>来源<select value={sources.includes(sourceFilter) ? sourceFilter : "全部来源"} onChange={event => setSourceFilter(event.target.value)}><option>全部来源</option>{sources.map(value => <option key={value}>{value}</option>)}</select></label>
-        <label>情绪<select value={emotions.includes(emotionFilter) ? emotionFilter : "全部情绪"} onChange={event => setEmotionFilter(event.target.value)}><option>全部情绪</option>{emotions.map(value => <option key={value}>{value}</option>)}</select></label>
+        {dashboardMode !== "bidirectional" ? <label>情绪<select value={emotions.includes(emotionFilter) ? emotionFilter : "全部情绪"} onChange={event => setEmotionFilter(event.target.value)}><option>全部情绪</option>{emotions.map(value => <option key={value}>{value}</option>)}</select></label> : null}
         {dashboardMode === "task2" ? <label>颜色<select value={colors.includes(colorFilter) ? colorFilter : "全部颜色"} onChange={event => setColorFilter(event.target.value)}><option>全部颜色</option>{colors.map(value => <option key={value}>{value}</option>)}</select></label> : null}
       </div>
+      <ComparisonFigureControl availableSources={availableComparisonSources} selectedSources={selectedComparisonSources} pairingMode={pairingMode} onToggle={toggleComparisonSource} onMove={moveComparisonSource} onPairingModeChange={updatePairingMode} />
 
       {dashboardMode === "task1"
         ? <Task1Dashboard rows={dashboardColors} fileName={fileName} />
         : dashboardMode === "task2"
-          ? <Task2Dashboard rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} />
-          : <BidirectionalVisualLab rows={dashboardBidirectional} />}
+          ? <Task2Dashboard rawRows={dashboardGewRaw} visibleEmotion={emotionFilter === "全部情绪" ? undefined : emotionFilter} fileName={fileName} pairingMode={pairingMode} />
+          : dashboardMode === "bidirectional"
+            ? <BidirectionalVisualLab colorRows={sourceFilter === "全部来源" ? colorData.rows : colorData.rows.filter(row => row.source === sourceFilter)} gewRows={sourceFilter === "全部来源" ? gewData.rows : gewData.rows.filter(row => row.source === sourceFilter)} fileName={fileName || "chromalab"} sourceOrder={selectedComparisonSources} />
+            : <LatentSpaceLab rows={dashboardColors} />}
     </section> : null}
-    {publicationExporting ? <div className="publication-export-stage" id="publication-export-stage" aria-hidden="true">
-      {colorData.rows.length ? <div data-publication-group="task1"><Task1VisualLab rows={colorData.rows} fileName={fileName} /></div> : null}
-      {gewData.rows.length ? <div data-publication-group="task2"><Task2VisualLab data={gewData.rows} fileName={fileName} /></div> : null}
-      {bidirectionalData.rows.length ? <div data-publication-group="bidirectional"><BidirectionalVisualLab rows={bidirectionalData.rows} /></div> : null}
-    </div> : null}
+    {tab === "machine-learning" ? <MachineLearningLab rows={gewData.rows} fileName={fileName || "chromalab"} /> : null}
   </>;
 }
 
@@ -1117,11 +1235,14 @@ function Task1Dashboard({ rows, fileName }: { rows: ReturnType<typeof parseColor
   const average = (key: "s" | "l" | "labL") => rows.length ? rows.reduce((sum, row) => sum + row[key], 0) / rows.length : 0;
   return <>
     <div className="dashboard-kpis"><article><span>有效色彩</span><strong>{rows.length.toLocaleString()}</strong><small>当前筛选范围</small></article><article><span>来源数</span><strong>{new Set(rows.map(row => row.source)).size}</strong><small>模型 / 文化组</small></article><article><span>平均饱和度</span><strong>{(average("s") * 100).toFixed(1)}%</strong><small>HSL S</small></article><article><span>平均明度</span><strong>{average("labL").toFixed(1)}</strong><small>CIE Lab L*</small></article></div>
+    <Task1Insights rows={rows} />
     <Task1VisualLab rows={rows} fileName={fileName} />
+    <ContinuousDistanceLab rows={rows} fileName={fileName} />
+    <Task1SimilarityLab rows={rows} fileName={fileName} />
   </>;
 }
 
-function Task2Dashboard({ rawRows, visibleEmotion, fileName }: { rawRows: GewRow[]; visibleEmotion?: string; fileName: string }) {
+function Task2Dashboard({ rawRows, visibleEmotion, fileName, pairingMode }: { rawRows: GewRow[]; visibleEmotion?: string; fileName: string; pairingMode: PairingMode }) {
   const sources = new Set(rawRows.map(row => row.source));
   const humanSources = new Set(rawRows.filter(row => row.cohort === "human").map(row => row.source));
   const aiSources = new Set(rawRows.filter(row => row.cohort === "ai").map(row => row.source));
@@ -1129,6 +1250,7 @@ function Task2Dashboard({ rawRows, visibleEmotion, fileName }: { rawRows: GewRow
   const significantPairs = pairwiseRows.filter(row => row["FDR_q值"] !== null && Number(row["FDR_q值"]) < .05).length;
   return <>
     <div className="dashboard-kpis"><article><span>独立试验组</span><strong>{sources.size}</strong><small>{humanSources.size}个人类组 + {aiSources.size}个AI组</small></article><article><span>全部组对</span><strong>{sources.size * (sources.size - 1) / 2}</strong><small>8组时共28个两两比较</small></article><article><span>组对×分析单元</span><strong>{pairwiseRows.length.toLocaleString()}</strong><small>颜色×情绪×来源对</small></article><article><span>选择率显著组对单元</span><strong>{pairwiseRows.length ? significantPairs : "—"}</strong><small>全部两两检验统一 BH-FDR</small></article></div>
-    <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} />
+    <Task2Insights rows={rawRows} visibleEmotion={visibleEmotion} />
+    <Task2VisualLab data={rawRows} visibleEmotion={visibleEmotion} fileName={fileName} pairingMode={pairingMode} />
   </>;
 }

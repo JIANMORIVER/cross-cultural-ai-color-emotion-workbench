@@ -1,7 +1,15 @@
 import { env } from "cloudflare:workers";
 import { applyRandomnessPolicy } from "../../experiment/randomness";
 import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
-import { buildChatRequest, friendlyModelApiError, safeEndpoint } from "../../experiment/model-request";
+import {
+  buildModelRequest,
+  friendlyModelApiError,
+  modelEndpoint,
+  modelHeaders,
+  modelResponseEmptyReason,
+  modelResponseText,
+  usesGeminiNativeApi,
+} from "../../experiment/model-request";
 import {
   GEMINI_STABLE_POLICY,
   retryDelayMilliseconds,
@@ -27,6 +35,8 @@ type PilotModel = {
 type PilotPayload = {
   error?: { message?: string };
   choices?: Array<{ message?: { content?: string } }>;
+  candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+  promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
 };
 
 function transientStatus(status: number) {
@@ -34,15 +44,16 @@ function transientStatus(status: number) {
 }
 
 async function requestPilot(apiKey: string, model: PilotModel, requestBody: Record<string, unknown>) {
-  const attemptLimit = usesGeminiStablePolicy(model) ? GEMINI_STABLE_POLICY.totalAttempts : 1;
+  const geminiNative = usesGeminiNativeApi(model.model_id);
+  const attemptLimit = geminiNative ? 3 : usesGeminiStablePolicy(model) ? GEMINI_STABLE_POLICY.totalAttempts : 1;
   for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
     let response: Response;
     try {
-      response = await fetch(safeEndpoint(model.base_url), {
+      response = await fetch(modelEndpoint(model), {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        headers: modelHeaders(model, apiKey),
         body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(usesGeminiStablePolicy(model) ? GEMINI_STABLE_POLICY.timeoutSeconds * 1000 : 60_000),
+        signal: AbortSignal.timeout(geminiNative ? 180_000 : usesGeminiStablePolicy(model) ? GEMINI_STABLE_POLICY.timeoutSeconds * 1000 : 60_000),
       });
     } catch (error) {
       if (attempt < attemptLimit - 1) {
@@ -76,12 +87,12 @@ export async function POST(request: Request) {
     const colorPrompt = buildColorToEmotionPrompt("J0", "#262626", body.settings, 1, 0);
     const basePrompt = task === "color" ? colorPrompt.prompt : buildWordToColorPrompt("Interest");
     const policy = applyRandomnessPolicy(basePrompt, body.settings, 1, 0, body.model.supports_seed);
-    const requestBody = buildChatRequest(body.model, policy.prompt, task, policy.nativeSeed);
+    const requestBody = buildModelRequest(body.model, policy.prompt, task, policy.nativeSeed, [task === "word" ? "Interest" : "J0"]);
 
     const { payload, retryCount } = await requestPilot(body.apiKey, body.model, requestBody);
 
-    const rawResponse = payload.choices?.[0]?.message?.content || "";
-    if (!rawResponse) return Response.json({ ok: false, message: "模型响应中没有可读取的回答内容。" }, { status: 400 });
+    const rawResponse = modelResponseText(body.model.model_id, payload);
+    if (!rawResponse) return Response.json({ ok: false, message: modelResponseEmptyReason(body.model.model_id, payload) }, { status: 400 });
     const colorResult = task === "word" ? parseColorResponse(rawResponse, "Interest") : null;
     const associationResult = task === "color" ? parseAssociationResponse(rawResponse) : null;
     const latencyMs = Date.now() - started;

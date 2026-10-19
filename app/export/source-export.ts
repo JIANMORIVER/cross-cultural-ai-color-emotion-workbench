@@ -71,6 +71,9 @@ export type ExportResult = {
   retry_count: number;
   latency_ms: number;
   created_at: string;
+  collection_mode?: string;
+  source_job_id?: string;
+  protocol_version?: string;
 };
 
 export type ExportPayload = {
@@ -217,6 +220,10 @@ function sourceResponse(result: ExportResult): unknown {
     if (result.stimulus_id in object) return object[result.stimulus_id];
   }
   return parsed ?? result.raw_response ?? result.clean_json;
+}
+
+function validatedResponse(result: ExportResult): unknown {
+  return parseJsonText(result.clean_json) ?? sourceResponse(result);
 }
 
 function jsonCell(value: unknown) {
@@ -382,7 +389,7 @@ export function buildSampleRows(payload: ExportPayload, colors: ReadonlyArray<re
 
     colors.forEach(([colorId]) => {
       const result = findStimulus(colorResults, colorId);
-      if (result) row[`word_data.${colorId}`] = jsonCell(scoreList(sourceResponse(result)));
+      if (result) row[`word_data.${colorId}`] = jsonCell(scoreList(validatedResponse(result)));
     });
     return row;
   });

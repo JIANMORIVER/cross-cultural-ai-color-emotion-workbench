@@ -1,7 +1,15 @@
 import { env } from "cloudflare:workers";
 import { applyRandomnessPolicy } from "../../experiment/randomness";
 import { buildColorToEmotionPrompt, buildWordToColorPrompt, type OrderPolicy } from "../../experiment/prompts";
-import { buildChatRequest, friendlyModelApiError, safeEndpoint } from "../../experiment/model-request";
+import {
+  buildModelRequest,
+  friendlyModelApiError,
+  modelEndpoint,
+  modelHeaders,
+  modelResponseEmptyReason,
+  modelResponseText,
+  usesGeminiNativeApi,
+} from "../../experiment/model-request";
 import { parseAssociationResponse, parseColorResponse } from "../../experiment/response-parser";
 
 const PROJECT_ID = "ECX-2026-001";
@@ -77,15 +85,17 @@ export async function POST(request: Request) {
       ? buildWordToColorPrompt(trial.stimulusId)
       : buildColorToEmotionPrompt(trial.stimulusId, trial.stimulusHex || "", body.settings, trial.runIndex, trial.stimulusIndex).prompt;
     const policy = applyRandomnessPolicy(prompt, body.settings, trial.runIndex, trial.stimulusIndex, body.model.supports_seed);
-    const requestBody = buildChatRequest(body.model, policy.prompt, trial.task, policy.nativeSeed);
+    const requestBody = buildModelRequest(body.model, policy.prompt, trial.task, policy.nativeSeed, [trial.stimulusId]);
 
     let response: Response;
     try {
-      response = await fetch(safeEndpoint(body.model.base_url), {
+      response = await fetch(modelEndpoint(body.model), {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${body.apiKey.trim()}` },
+        headers: modelHeaders(body.model, body.apiKey.trim()),
         body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(Math.max(5, Number(body.settings.timeout_seconds) || 60) * 1000),
+        signal: AbortSignal.timeout((usesGeminiNativeApi(body.model.model_id)
+          ? Math.max(180, Number(body.settings.timeout_seconds) || 180)
+          : Math.max(5, Number(body.settings.timeout_seconds) || 60)) * 1000),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "模型网络请求失败。";
@@ -101,6 +111,8 @@ export async function POST(request: Request) {
     })() as {
       error?: { message?: string; type?: string; code?: string; param?: string };
       choices?: Array<{ finish_reason?: string; message?: { content?: string; refusal?: string | null } }>;
+      candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
     };
     if (!response.ok) {
       const retryAfter = response.headers.get("retry-after");
@@ -118,14 +130,12 @@ export async function POST(request: Request) {
       return Response.json({ ok: false, retryable, message, retryAfter, httpStatus: response.status }, { status: response.status });
     }
 
-    const rawResponse = payload.choices?.[0]?.message?.content || "";
+    const rawResponse = modelResponseText(body.model.model_id, payload);
     if (!rawResponse) {
+      const blocked = usesGeminiNativeApi(body.model.model_id) && Boolean(payload.promptFeedback?.blockReason);
       const refusal = payload.choices?.[0]?.message?.refusal;
-      const finishReason = payload.choices?.[0]?.finish_reason;
-      const retryable = !refusal;
-      const message = refusal
-        ? `模型拒绝回答：${refusal}`
-        : `模型响应中没有可读取的回答内容${finishReason ? `（finish_reason=${finishReason}）` : ""}。`;
+      const retryable = !refusal && !blocked;
+      const message = modelResponseEmptyReason(body.model.model_id, payload);
       await saveAttempt({
         logicalTrialId, model: body.model, trial, attemptNo, status: "empty_response",
         httpStatus: response.status, retryable, errorMessage: message,
@@ -162,16 +172,18 @@ export async function POST(request: Request) {
       retry_count: Number(body.retryCount || 0),
       latency_ms: Date.now() - started,
       created_at: new Date().toISOString(),
+      protocol_version: usesGeminiNativeApi(body.model.model_id) ? "gemini-native-generate-content-v1" : "realtime-v1",
     };
 
     await env.DB.batch([
       env.DB.prepare(`INSERT OR REPLACE INTO trial_results (
         trial_id, project_id, model_id, model_alias, task_type, run_index, stimulus_id,
-        clean_json, raw_response, validation_status, retry_count, latency_ms, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        clean_json, raw_response, validation_status, retry_count, latency_ms, created_at,
+        collection_mode, source_job_id, protocol_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'realtime', '', ?)`)
         .bind(result.trial_id, result.project_id, result.model_id, result.model_alias, result.task_type,
           result.run_index, result.stimulus_id, result.clean_json, result.raw_response,
-          result.validation_status, result.retry_count, result.latency_ms, result.created_at),
+          result.validation_status, result.retry_count, result.latency_ms, result.created_at, result.protocol_version),
       env.DB.prepare(`INSERT OR REPLACE INTO trial_attempts (
         attempt_id, logical_trial_id, project_id, model_id, model_alias, task_type,
         run_index, stimulus_id, attempt_no, status, http_status, retryable,

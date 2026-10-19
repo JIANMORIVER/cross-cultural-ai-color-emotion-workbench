@@ -18,6 +18,11 @@ export type CanonicalColorRow = {
   row: number;
   source: string;
   cohort: "human" | "ai" | "unspecified";
+  participant: string;
+  run: string;
+  sourceRow: number;
+  identityProvided: boolean;
+  identitySource: "original" | "generated-wide-row" | "missing";
   emotion: string;
   inputFormat: ColorFormat;
   conversionPath: string;
@@ -47,6 +52,8 @@ export type GewRow = {
   selected: number;
   intensity: number;
   valid: boolean;
+  identityProvided: boolean;
+  sourceRow: number;
 };
 
 export type AnalysisResult = {
@@ -87,8 +94,8 @@ const ALIASES = {
   h: ["h_hsl", "hsl_h", "hue_hsl", "h", "hue"], s: ["s_hsl", "hsl_s", "saturation_hsl", "s", "saturation"], l: ["l_hsl", "hsl_l", "lightness_hsl", "lightness", "l"],
   hh: ["h_hsv", "hsv_h", "hue_hsv"], ss: ["s_hsv", "hsv_s", "saturation_hsv"], v: ["v", "value", "hsv_v"],
   labL: ["l*", "lab_l", "l_lab", "cie_l"], labA: ["a*", "lab_a", "a_lab", "cie_a"], labB: ["b*", "lab_b", "b_lab", "cie_b"],
-  participant: ["participant", "participant_id", "sample_id", "id", "trial_id", "实验id", "样本id"],
-  run: ["run", "run_index", "repetition", "轮次", "重复轮次"],
+  participant: ["_analysis_participant_id", "participant", "participant_id", "sample_id", "id", "trial_id", "objectid", "object_id", "实验id", "样本id"],
+  run: ["_analysis_run_id", "run", "run_id", "run_index", "repetition", "轮次", "重复轮次"],
   cohort: ["_analysis_cohort", "cohort", "participant_type", "source_type", "样本类型", "组类型"],
 };
 
@@ -238,9 +245,11 @@ function canonical(
   conversionPath: string,
   consistencyDeltaE: number | null = null,
   authoritativeLab?: { l: number; a: number; b: number },
+  unit?: { participant?: string; run?: string; identitySource?: CanonicalColorRow["identitySource"] },
 ): CanonicalColorRow {
   const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b), hsv = rgbToHsv(rgb.r, rgb.g, rgb.b), lab = authoritativeLab || rgbToLab(rgb.r, rgb.g, rgb.b);
-  return { row, source, cohort, emotion, inputFormat, conversionPath, consistencyDeltaE, hex: rgbToHex(rgb.r, rgb.g, rgb.b), r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b), h: hsl.h, s: hsl.s, l: hsl.l, hsvH: hsv.h, hsvS: hsv.s, hsvV: hsv.v, labL: lab.l, labA: lab.a, labB: lab.b };
+  const identitySource = unit?.identitySource || (unit?.participant || unit?.run ? "original" : "missing");
+  return { row, source, cohort, participant: unit?.participant || "", run: unit?.run || "", sourceRow: row, identityProvided: Boolean(unit?.participant || unit?.run), identitySource, emotion, inputFormat, conversionPath, consistencyDeltaE, hex: rgbToHex(rgb.r, rgb.g, rgb.b), r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b), h: hsl.h, s: hsl.s, l: hsl.l, hsvH: hsv.h, hsvS: hsv.s, hsvV: hsv.v, labL: lab.l, labA: lab.a, labB: lab.b };
 }
 
 function rgbDeltaE(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
@@ -292,6 +301,16 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
   const result: CanonicalColorRow[] = []; let rejected = 0;
   const sourceColumn = findColumn(columns, ALIASES.source);
   const cohortColumn = findColumn(columns, ALIASES.cohort);
+  const participantColumn = findColumn(columns, ALIASES.participant);
+  const runColumn = findColumn(columns, ALIASES.run);
+  const identitySourceOf = (raw: DataRow): CanonicalColorRow["identitySource"] => {
+    const value = text(raw._analysis_identity_origin);
+    return value === "generated-wide-row" || value === "original" ? value : "missing";
+  };
+  const sourceRowOf = (raw: DataRow, fallback: number) => {
+    const value = num(raw._analysis_source_row);
+    return Number.isFinite(value) ? value : fallback;
+  };
   if (schema === "task1-wide" || schema === "mixed") {
     const emotions = [...new Set(columns.map(column => column.match(/^color_data\.(.+)\.(h|s|l|hex)$/i)?.[1]).filter((value): value is string => Boolean(value)))];
     rows.forEach((raw, index) => emotions.forEach(emotion => {
@@ -307,7 +326,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
         const inputFormat: ColorFormat = hslRgb ? "HSL" : "HEX";
         const mismatch = hslRgb && hex ? rgbDeltaE(hslRgb, hex) : null;
         result.push(canonical(
-          index + 1,
+          sourceRowOf(raw, index + 1),
           text(sourceColumn ? raw[sourceColumn] : null, "未分组"),
           normalizeCohort(cohortColumn ? raw[cohortColumn] : null),
           normalizeTask1Emotion(emotion),
@@ -315,6 +334,8 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
           inputFormat,
           hslRgb ? "HSL → sRGB (D65) → CIELAB / HSV" : "HEX → sRGB → HSL / HSV / CIELAB (D65)",
           mismatch,
+          undefined,
+          { participant: text(participantColumn ? raw[participantColumn] : null), run: text(runColumn ? raw[runColumn] : null), identitySource: identitySourceOf(raw) },
         ));
       } else rejected += 1;
     }));
@@ -368,7 +389,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
     if (selected) {
       const comparison = [directRgb, hexRgb, hsvRgb, labRgb].find(candidate => candidate && candidate !== selected.rgb);
       result.push(canonical(
-        index + 1,
+        sourceRowOf(raw, index + 1),
         text(sourceColumn ? raw[sourceColumn] : null, "未分组"),
         normalizeCohort(cohortColumn ? raw[cohortColumn] : null),
         normalizeTask1Emotion(text(emotionColumn ? raw[emotionColumn] : null, "未标注")),
@@ -377,6 +398,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
         selected.path,
         comparison ? rgbDeltaE(selected.rgb, comparison) : null,
         selected.format === "Lab" ? { l: labValues[0], a: labValues[1], b: labValues[2] } : undefined,
+        { participant: text(participantColumn ? raw[participantColumn] : null), run: text(runColumn ? raw[runColumn] : null), identitySource: identitySourceOf(raw) },
       ));
     } else rejected += 1;
   });
@@ -384,7 +406,7 @@ export function parseColorRows(rows: DataRow[], columns: string[], schema: Schem
 }
 
 export function colorRowsToExport(rows: CanonicalColorRow[]): ExportRow[] {
-  return rows.map(row => ({ 行号: row.row, 来源: row.source, 组类型: row.cohort, 情绪: row.emotion, 原始权威格式: row.inputFormat, 转换路径: row.conversionPath, 多格式一致性ΔE76: row.consistencyDeltaE == null ? null : round(row.consistencyDeltaE, 4), HEX: row.hex, R: row.r, G: row.g, B: row.b, H_HSL: round(row.h, 2), S_HSL: round(row.s, 4), L_HSL: round(row.l, 4), H_HSV: round(row.hsvH, 2), S_HSV: round(row.hsvS, 4), V_HSV: round(row.hsvV, 4), L_Lab: round(row.labL, 3), a_Lab: round(row.labA, 3), b_Lab: round(row.labB, 3) }));
+  return rows.map(row => ({ 行号: row.row, 来源: row.source, 组类型: row.cohort, 分组CV身份ID: row.participant || row.run, participant_id: row.participant, run_id: row.run, 原始行配对号: row.sourceRow, 身份ID来源: row.identitySource, 可用于分组CV: row.identityProvided, 原始ID存在: row.identitySource === "original", 情绪: row.emotion, 原始权威格式: row.inputFormat, 转换路径: row.conversionPath, 多格式一致性ΔE76: row.consistencyDeltaE == null ? null : round(row.consistencyDeltaE, 4), HEX: row.hex, R: row.r, G: row.g, B: row.b, H_HSL: round(row.h, 2), S_HSL: round(row.s, 4), L_HSL: round(row.l, 4), H_HSV: round(row.hsvH, 2), S_HSV: round(row.hsvS, 4), V_HSV: round(row.hsvV, 4), L_Lab: round(row.labL, 3), a_Lab: round(row.labA, 3), b_Lab: round(row.labB, 3) }));
 }
 
 function distance(a: CanonicalColorRow | number[], b: CanonicalColorRow | number[]) {
@@ -453,6 +475,96 @@ export function runColorClustering(colors: CanonicalColorRow[]): AnalysisResult 
   return { id: "task1-cluster", title: "最佳 K 与 Lab 色彩聚类", kind: "colors", rows, summary: [{ label: "来源×情绪组合", value: String(keys.length) }, { label: "聚类中心", value: String(rows.length) }, { label: "K 搜索范围", value: "2–5" }], note: "沿用 Bias_kNumbers.py 的规则：样本数不足 5 的组合跳过；其余在 CIE Lab 空间搜索 K=2–5，并用平均轮廓系数选择最佳 K。每个K执行10次确定性k-means++初始化并保留组内平方和最小解，对齐历史 sklearn n_init=10 的分析意图。" };
 }
 
+/**
+ * Fixed-K representative colours for descriptive palettes.
+ * This is deliberately separate from runColorClustering(): the centres are
+ * communication aids, not evidence that the observations form "true" groups.
+ */
+export function runRepresentativeColors(colors: CanonicalColorRow[], requestedK = 3): AnalysisResult {
+  const rows: ExportRow[] = [];
+  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
+  keys.forEach(key => {
+    const [source, emotion] = key.split("\u0000");
+    const group = colors.filter(row => row.source === source && row.emotion === emotion);
+    const points = group.map(row => [row.labL, row.labA, row.labB]);
+    const uniquePoints = new Set(points.map(point => point.map(value => value.toFixed(8)).join("\u0000"))).size;
+    if (!points.length || !uniquePoints) return;
+    const k = Math.max(1, Math.min(requestedK, points.length, uniquePoints));
+    const fitted = kmeans(points, k);
+    const ranked = fitted.centers.map((center, cluster) => ({
+      center,
+      count: fitted.labels.filter(label => label === cluster).length,
+    })).sort((a, b) => b.count - a.count);
+    ranked.forEach((item, index) => {
+      const rgb = labToRgb(item.center[0], item.center[1], item.center[2]);
+      rows.push({
+        来源: source,
+        组类型: group[0]?.cohort || "unspecified",
+        情绪: emotion,
+        样本数: points.length,
+        代表色序号: index + 1,
+        代表色数量: k,
+        比例: round(item.count / points.length, 6),
+        中心HEX: rgbToHex(rgb.r, rgb.g, rgb.b),
+        中心L: round(item.center[0], 4),
+        中心a: round(item.center[1], 4),
+        中心b: round(item.center[2], 4),
+      });
+    });
+  });
+  return {
+    id: "task1-representative-colors",
+    title: "Representative Colors（解释性代表色）",
+    kind: "colors",
+    rows,
+    summary: [
+      { label: "固定代表色数", value: String(requestedK) },
+      { label: "来源×情绪", value: String(keys.length) },
+      { label: "颜色空间", value: "CIELAB" },
+    ],
+    note: "每个来源×情绪在连续 CIELAB 中固定提取最多 3 个代表色，并报告样本比例。KMeans 仅用于压缩展示，不作为主要推断统计，也不把连续颜色解释为天然类别。",
+  };
+}
+
+export function runContinuousHueEntropy(colors: CanonicalColorRow[], bins = 36): AnalysisResult {
+  const keys = [...new Set(colors.map(row => `${row.source}\u0000${row.emotion}`))];
+  const rows: ExportRow[] = keys.map(key => {
+    const [source, emotion] = key.split("\u0000");
+    const group = colors.filter(row => row.source === source && row.emotion === emotion);
+    const chromatic = group.filter(row => row.hsvS > .01);
+    const counts = hueHistogram(group, bins);
+    const entropy = counts.reduce((sum, count) => {
+      const probability = count / Math.max(1, chromatic.length);
+      return probability ? sum - probability * Math.log2(probability) : sum;
+    }, 0);
+    const maxEntropy = Math.log2(bins);
+    return {
+      来源: source,
+      组类型: group[0]?.cohort || "unspecified",
+      情绪: emotion,
+      N: group.length,
+      有效色相N: chromatic.length,
+      无彩色N: group.length - chromatic.length,
+      色相熵_bits: round(entropy, 6),
+      标准化色相熵: round(maxEntropy ? entropy / maxEntropy : 0, 6),
+      有效色相箱数: round(2 ** entropy, 4),
+      分箱宽度_度: round(360 / bins, 3),
+    };
+  });
+  return {
+    id: "task1-continuous-hue-entropy",
+    title: "连续 Hue 分布熵",
+    kind: "statistics",
+    rows,
+    summary: [
+      { label: "来源×情绪", value: String(rows.length) },
+      { label: "Hue 分箱", value: `${bins} × ${round(360 / bins, 1)}°` },
+      { label: "无彩色处理", value: "单独计数" },
+    ],
+    note: "Hue 图仍按连续角度呈现；熵作为分布估计量使用固定 10° 圆周分箱。S≤0.01 的无彩色样本不被错误记作 0° 红色，而是单独报告。标准化熵范围 0–1，仅表示分散程度，不表示颜色选择更正确。",
+  };
+}
+
 function symmetricMinDistance(a: CanonicalColorRow[], b: CanonicalColorRow[]) {
   if (!a.length || !b.length) return NaN;
   const ab = a.reduce((sum, item) => sum + Math.min(...b.map(other => distance(item, other))), 0) / a.length;
@@ -464,9 +576,9 @@ export function runDeltaE(colors: CanonicalColorRow[]): AnalysisResult {
   const sources = [...new Set(colors.map(row => row.source))]; const emotions = [...new Set(colors.map(row => row.emotion))]; const rows: ExportRow[] = [];
   emotions.forEach(emotion => sources.forEach((sourceA, ai) => sources.slice(ai + 1).forEach(sourceB => {
     const a = colors.filter(row => row.emotion === emotion && row.source === sourceA); const b = colors.filter(row => row.emotion === emotion && row.source === sourceB); const delta = symmetricMinDistance(a, b);
-    if (Number.isFinite(delta)) rows.push({ 情绪: emotion, 来源A: sourceA, 来源B: sourceB, A样本数: a.length, B样本数: b.length, 对称最小ΔE76: round(delta, 3), 差异等级: delta < 2.3 ? "几乎不可察觉" : delta < 10 ? "可察觉" : delta < 25 ? "明显" : "非常明显" });
+    if (Number.isFinite(delta)) rows.push({ 情绪: emotion, 来源A: sourceA, 来源B: sourceB, A样本数: a.length, B样本数: b.length, 对称最小ΔE76: round(delta, 3), 指标类型: "对称最近邻（Chamfer 型）", 解释限制: "支持集邻近度；非均值色差、非EMD、非单色感知阈值" });
   })));
-  return { id: "task1-delta", title: "跨来源色差与偏差", kind: "matrix", rows, summary: [{ label: "来源", value: String(sources.length) }, { label: "情绪", value: String(emotions.length) }, { label: "有效比较", value: String(rows.length) }], note: "沿用历史脚本的双向最近邻思想，计算每个情绪下来源之间的对称最小 CIE76 色差。" };
+  return { id: "task1-delta", title: "跨来源对称最近邻 ΔE（补充）", kind: "matrix", rows, summary: [{ label: "来源", value: String(sources.length) }, { label: "情绪", value: String(emotions.length) }, { label: "有效比较", value: String(rows.length) }, { label: "指标性质", value: "Chamfer 型支持集距离" }], note: "公式为 ½[meanₐ minᵦ ΔE76(a,b) + meanᵦ minₐ ΔE76(b,a)]。它只衡量两组色点支持集是否彼此靠近，会受分布覆盖范围、重复点和样本密度影响；不能使用 ΔE=2.3 等单色感知阈值解释，也不应作为 Human–AI 分布相似性的主指标。主相似性分析请使用 EMD/JSD，并同时报告 coverage 与 classifier AUC。" };
 }
 
 export function runColorSummary(colors: CanonicalColorRow[], rejected: number): AnalysisResult {
@@ -733,13 +845,14 @@ export function parseGewRows(rows: DataRow[], columns: string[]): { rows: GewRow
     const color = column.replace(/^word_data\./i, ""); const parsed = associations(raw[column]); const valid = parsed !== null;
     if (!valid) invalidCells += 1;
     const map = new Map((parsed || []).filter(item => GEW_EMOTIONS.includes(item.emotion as typeof GEW_EMOTIONS[number]) && Number.isFinite(item.intensity)).map(item => [item.emotion, clamp(item.intensity, 0, 5)]));
-    GEW_EMOTIONS.forEach(emotion => { const intensity = map.get(emotion) || 0; result.push({ participant: text(participantColumn ? raw[participantColumn] : null, String(rowIndex + 1)), source: text(sourceColumn ? raw[sourceColumn] : null, "未分组"), cohort: normalizeCohort(cohortColumn ? raw[cohortColumn] : null), run: text(runColumn ? raw[runColumn] : null, String(rowIndex + 1)), color, emotion, selected: intensity > 0 ? 1 : 0, intensity, valid }); });
+    const participant = text(participantColumn ? raw[participantColumn] : null), run = text(runColumn ? raw[runColumn] : null);
+    GEW_EMOTIONS.forEach(emotion => { const intensity = map.get(emotion) || 0; result.push({ participant: participant || String(rowIndex + 1), source: text(sourceColumn ? raw[sourceColumn] : null, "未分组"), cohort: normalizeCohort(cohortColumn ? raw[cohortColumn] : null), run: run || String(rowIndex + 1), color, emotion, selected: intensity > 0 ? 1 : 0, intensity, valid, identityProvided: Boolean(participant || run), sourceRow: rowIndex + 1 }); });
     });
   });
   return { rows: result, sourceRows, invalidCells };
 }
 
-export function gewRowsToExport(rows: GewRow[]): ExportRow[] { return rows.map(row => ({ 样本ID: row.participant, 来源: row.source, 组类型: row.cohort, 轮次: row.run, 颜色: row.color, 情绪: row.emotion, 是否选择: row.selected, 强度: row.intensity, 原始单元格有效: row.valid })); }
+export function gewRowsToExport(rows: GewRow[]): ExportRow[] { return rows.map(row => ({ 样本ID: row.participant, 来源: row.source, 组类型: row.cohort, 轮次: row.run, 原始行配对号: row.sourceRow, 颜色: row.color, 情绪: row.emotion, 是否选择: row.selected, 强度: row.intensity, 原始单元格有效: row.valid, 原始ID存在: row.identityProvided })); }
 
 export function runGewQc(parsed: ReturnType<typeof parseGewRows>): AnalysisResult {
   const combinations = new Set(parsed.rows.map(row => `${row.source}\u0000${row.color}`)).size;

@@ -117,6 +117,22 @@ export function parseColorResponse(content: string, emotion: string) {
   return hexToHsl(normalizeHex(findHexCandidate(parsed, emotion)));
 }
 
+export function parseColorBatchResponse(content: string, emotions: readonly string[]) {
+  const root = asRecord(extractBalancedJson(content));
+  if (!root) throw new Error("整组词选色回答必须为 JSON 对象。");
+  const canonical = new Map(emotions.map(emotion => [emotion.toLowerCase(), emotion]));
+  const answers = new Map<string, ReturnType<typeof hexToHsl>>();
+  for (const [key, value] of Object.entries(root)) {
+    const emotion = canonical.get(key.trim().toLowerCase());
+    if (!emotion) throw new Error(`整组词选色出现未请求的情绪：${key}。`);
+    if (answers.has(emotion)) throw new Error(`整组词选色重复回答：${emotion}。`);
+    answers.set(emotion, hexToHsl(normalizeHex(findHexCandidate(value, emotion))));
+  }
+  const missing = emotions.filter(emotion => !answers.has(emotion));
+  if (missing.length) throw new Error(`整组词选色缺少 ${missing.length} 个情绪：${missing.join(", ")}。`);
+  return emotions.map(emotion => ({ emotion, color: answers.get(emotion)! }));
+}
+
 function associationSource(value: unknown): unknown {
   if (Array.isArray(value)) return value;
   const object = asRecord(value);
@@ -165,3 +181,73 @@ export function parseAssociationResponse(content: string) {
   };
 }
 
+export type AssociationParseFormat = "object-array" | "score-map" | "root-score-fields";
+
+export function parseAssociationResponseWithProvenance(content: string) {
+  const clean = parseAssociationResponse(content);
+  const parsed = extractBalancedJson(content);
+  const record = asRecord(parsed);
+  const format: AssociationParseFormat = Array.isArray(parsed) || Array.isArray(record?.associations)
+    ? "object-array"
+    : record?.scores && asRecord(record.scores)
+      ? "score-map"
+      : "root-score-fields";
+  return { clean, format };
+}
+
+export function parseRatingVectorResponse(content: string) {
+  const parsed = asRecord(extractBalancedJson(content));
+  if (!parsed) throw new Error("新版色选词回答必须是 JSON 对象。");
+  if (Object.prototype.hasOwnProperty.call(parsed, "ratings")) throw new Error("新版色选词必须是顶层 20 键对象，不能使用 ratings 包装层。");
+  const canonical = new Map(EXPERIMENT_EMOTIONS.map(emotion => [emotion.toLowerCase(), emotion]));
+  const keys = Object.keys(parsed);
+  const unknown = keys.filter(key => !canonical.has(key.toLowerCase()));
+  const missing = EXPERIMENT_EMOTIONS.filter(emotion => !keys.some(key => key.toLowerCase() === emotion.toLowerCase()));
+  if (unknown.length || missing.length || keys.length !== EXPERIMENT_EMOTIONS.length) {
+    throw new Error(`新版色选词必须完整返回 20 个固定情绪键；缺失 ${missing.length}，额外 ${unknown.length}。`);
+  }
+  const associations: Array<{ emotion: string; intensity: number }> = [];
+  for (const [rawEmotion, rawIntensity] of Object.entries(parsed)) {
+    const emotion = canonical.get(rawEmotion.toLowerCase());
+    if (!emotion) continue;
+    if (typeof rawIntensity !== "number" || !Number.isInteger(rawIntensity) || rawIntensity < 0 || rawIntensity > 5) throw new Error(`${emotion} 必须是 0–5 的整数编码。`);
+    if (rawIntensity > 0) associations.push({ emotion, intensity: rawIntensity });
+  }
+  if (!associations.length) throw new Error("新版色选词至少需要一个 1–5 的有效关联。");
+  associations.sort((a, b) => EXPERIMENT_EMOTIONS.indexOf(a.emotion as typeof EXPERIMENT_EMOTIONS[number]) - EXPERIMENT_EMOTIONS.indexOf(b.emotion as typeof EXPERIMENT_EMOTIONS[number]));
+  return { associations };
+}
+
+export function parseAssociationBatchResponse(content: string, colorIds: readonly string[]) {
+  const root = asRecord(extractBalancedJson(content));
+  if (!root) throw new Error("整组色选词回答必须为 JSON 对象。");
+  const canonical = new Map(colorIds.map(colorId => [colorId.toLowerCase(), colorId]));
+  const answers = new Map<string, ReturnType<typeof parseAssociationResponse>>();
+  for (const [key, value] of Object.entries(root)) {
+    const colorId = canonical.get(key.trim().toLowerCase());
+    if (!colorId) throw new Error(`整组色选词出现未请求的颜色：${key}。`);
+    if (answers.has(colorId)) throw new Error(`整组色选词重复回答：${colorId}。`);
+    answers.set(colorId, parseAssociationResponse(JSON.stringify(value)));
+  }
+  const missing = colorIds.filter(colorId => !answers.has(colorId));
+  if (missing.length) throw new Error(`整组色选词缺少 ${missing.length} 个颜色：${missing.join(", ")}。`);
+  return colorIds.map(colorId => ({ colorId, association: answers.get(colorId)! }));
+}
+
+export function parseRatingVectorBatchResponse(content: string, colorIds: readonly string[]) {
+  const root = asRecord(extractBalancedJson(content));
+  if (!root) throw new Error("整组色选词回答必须为 JSON 对象。");
+  const canonical = new Map(colorIds.map(colorId => [colorId.toLowerCase(), colorId]));
+  const answers = new Map<string, ReturnType<typeof parseRatingVectorResponse>>();
+  for (const [key, value] of Object.entries(root)) {
+    const colorId = canonical.get(key.trim().toLowerCase());
+    if (!colorId) throw new Error(`整组色选词出现未请求的颜色：${key}。`);
+    if (answers.has(colorId)) throw new Error(`整组色选词重复回答：${colorId}。`);
+    answers.set(colorId, parseRatingVectorResponse(JSON.stringify(value)));
+  }
+  const missing = colorIds.filter(colorId => !answers.has(colorId));
+  if (missing.length || Object.keys(root).length !== colorIds.length) {
+    throw new Error(`整组色选词必须完整返回 ${colorIds.length} 个颜色；缺少 ${missing.length} 个。`);
+  }
+  return colorIds.map(colorId => ({ colorId, association: answers.get(colorId)! }));
+}

@@ -1,0 +1,8 @@
+Chromalab 3006 R9000P Windows Package
+Build date: 2026-08-23
+Feature revision: Continuous Inference Layers v3
+Website port: 3006
+Python analysis port: 8773
+Python target: 3.11 x64
+Node.js target: 22 LTS or newer
+Formal offline modes: continuous distance; multi-level similarity

@@ -18,8 +18,12 @@ export const GEMINI_STABLE_POLICY = {
 } as const;
 
 export function usesGeminiStablePolicy(model: ExecutionPolicyModel) {
-  const signature = `${model.provider || ""} ${model.alias || ""} ${model.model_id || ""} ${model.base_url || ""}`.toLowerCase();
-  return signature.includes("gemini") || signature.includes("google") || signature.includes("generativelanguage.googleapis.com");
+  // The grouped-submission edition intentionally uses the same configurable
+  // queue for Gemini as for the other providers: no isolated RPM cap, long
+  // backoff, cooldown, or daily quota gate is imposed by the application.
+  // Provider-side 429/503 responses are still retried with the standard policy.
+  void model;
+  return false;
 }
 
 export function effectiveRequestsPerMinute(model: ExecutionPolicyModel) {

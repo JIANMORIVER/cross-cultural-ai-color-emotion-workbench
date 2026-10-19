@@ -7,7 +7,7 @@ test("defines the Chromalab research workspace and social metadata", async () =>
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(layout, /Chromalab — 情绪—颜色实验与数据分析平台/);
+  assert.match(layout, /Chromalab 3006 · 连续色彩分布距离版/);
   assert.match(layout, /og-analysis\.png/);
   assert.match(platform, /定义研究项目/);
   assert.match(platform, /英文情绪词/);
@@ -75,7 +75,7 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(task1Visuals, /文化距离斜率图/);
   assert.match(task1Visuals, /a\*–b\* 色域密度分面/);
   assert.match(task1Visuals, /L\* 与色度分布 \/ 集中度/);
-  assert.match(task1Visuals, /导出当前视图 PNG|exportCurrentPng/);
+  assert.match(task1Visuals, /导出科研图|exportCurrentFigure/);
   assert.match(task2Visuals, /关联概率与条件强度/);
   assert.match(task2Visuals, /各来源颜色—情绪气泡点阵/);
   assert.match(task2Visuals, /所有来源采用同一尺度/);
@@ -90,16 +90,16 @@ test("provides local multi-file analysis, independent exports, and filtered dash
   assert.match(task2Visuals, /覆盖全部28个组对/);
   assert.match(task2Visuals, /单一来源、单一颜色的情绪画像/);
   assert.match(task2Visuals, /两个指定来源的差值热力图/);
-  assert.match(bidirectionalVisuals, /八来源 P \/ Q 明细/);
-  assert.match(bidirectionalVisuals, /同一情绪的双向概率色带/);
-  assert.match(bidirectionalVisuals, /Q 口径/);
-  assert.match(bidirectionalVisuals, /八组情绪指标总览/);
-  assert.match(bidirectionalVisuals, /8×8 组间矩阵/);
-  assert.match(bidirectionalVisuals, /任选两组差值/);
-  assert.match(bidirectionalVisuals, /八组双向指标热图/);
-  assert.match(bidirectionalVisuals, /方向差热图（综合）/);
-  assert.match(bidirectionalVisuals, /双向散点（综合）/);
-  assert.match(analysis, /双向整合 · 探索/);
+  assert.match(bidirectionalVisuals, /participant \/ AI run 配对/);
+  assert.match(bidirectionalVisuals, /矩阵 A/);
+  assert.match(bidirectionalVisuals, /矩阵 B/);
+  assert.match(bidirectionalVisuals, /Cycle/);
+  assert.match(bidirectionalVisuals, /Permutation/);
+  assert.match(bidirectionalVisuals, /八组比较/);
+  assert.match(bidirectionalVisuals, /对角优势/);
+  assert.match(bidirectionalVisuals, /结构距离/);
+  assert.match(bidirectionalVisuals, /Cross-task ML/);
+  assert.match(analysis, /05 双向颜色—情绪探索/);
 });
 
 test("removes starter preview markers and keeps API keys out of exports", async () => {
@@ -177,9 +177,9 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
   assert.match(platform, /试跑实验二/);
   assert.match(platform, /加入并行实验组/);
   assert.match(pilotRoute, /INSERT INTO trial_results/);
-  assert.match(pilotRoute, /buildChatRequest/);
-  assert.match(runRoute, /buildChatRequest/);
-  assert.match(modelTestRoute, /buildChatRequest/);
+  assert.match(pilotRoute, /buildModelRequest/);
+  assert.match(runRoute, /buildModelRequest/);
+  assert.match(modelTestRoute, /buildModelRequest/);
   assert.match(modelTestRoute, /MAX_PROBE_ATTEMPTS = 4/);
   assert.match(modelTestRoute, /retry-after/);
   assert.match(modelTestRoute, /1000 \* 2 \*\* attempt/);
@@ -188,7 +188,9 @@ test("supports one-model pilots, current GPT-5.6 variants, and a real saved pilo
   assert.match(modelRequest, /reasoning_effort = "none"/);
   assert.match(modelRequest, /isGemini36Flash/);
   assert.match(modelRequest, /supportsSamplingControls/);
-  assert.match(modelRequest, /reasoning_effort = "low"/);
+  assert.match(modelRequest, /thinkingConfig: \{ thinkingLevel: "low" \}/);
+  assert.match(modelRequest, /:generateContent/);
+  assert.match(modelRequest, /"x-goog-api-key"/);
   assert.match(modelRequest, /body\.thinking = \{ type: "disabled" \}/);
   assert.match(modelRequest, /Doubao-Seed-2\.1-Pro 当前不可用/);
   assert.match(modelRequest, /body\.top_p = topP/);
@@ -319,59 +321,61 @@ test("persists exact failed attempts and uses tolerant validated response parsin
 });
 
 test("registers an a-priori trial manifest and allows one capped post-run repair only for retryable missing trials", async () => {
-  const [platform, manifestRoute, runRoute, workspaceRoute, migration] = await Promise.all([
+  const [platform, manifestRoute, runRoute, groupRoute, workspaceRoute, migration] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/trial-manifest/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/run-trial/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/run-group/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/workspace/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0007_wandering_vivisector.sql", import.meta.url), "utf8"),
   ]);
   assert.match(platform, /registerTrialManifest/);
-  assert.match(platform, /const attemptLimit = totalAttemptLimit\(item\.model, settings\.max_retry\)/);
+  assert.match(platform, /groupForSubmission/);
+  assert.match(platform, /const attemptLimit = totalAttemptLimit\(group\.model, settings\.max_retry\)/);
   assert.match(platform, /repairMissingTrials/);
   assert.match(platform, /已经有效的回答绝不重新抽样/);
   assert.match(manifestRoute, /LEFT JOIN trial_results/);
   assert.match(manifestRoute, /repair_attempted_at IS NULL/);
   assert.match(manifestRoute, /item\.lastRetryable === true/);
   assert.match(runRoute, /const retryable = !refusal/);
+  assert.match(groupRoute, /整组词选色缺少|parseColorBatchResponse/);
+  assert.match(groupRoute, /整组色选词缺少|parseAssociationBatchResponse/);
   assert.match(workspaceRoute, /CREATE TABLE IF NOT EXISTS trial_manifest/);
   assert.match(migration, /CREATE TABLE `trial_manifest`/);
 });
 
-test("runs Gemini through one isolated worker with long backoff and a circuit-breaker cooldown", async () => {
-  const [platform, policy, modelTest, pilotTest, sourceExport] = await Promise.all([
+test("supports both realtime grouped Gemini runs and two-item native Batch rounds", async () => {
+  const [platform, batchPanel, batchRoute, batchBuilder, modelTest, sourceExport] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/experiment/execution-policy.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/GeminiBatchPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/gemini-batch/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/experiment/gemini-batch.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/model-test/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/pilot-test/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/export/source-export.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(policy, /concurrency: 1/);
-  assert.match(policy, /requestsPerMinute: 8/);
-  assert.match(policy, /timeoutSeconds: 90/);
-  assert.match(policy, /retryDelaysMs: \[5_000, 20_000, 60_000\]/);
-  assert.match(policy, /cooldownThreshold: 3/);
-  assert.match(policy, /cooldownMs: 180_000/);
-  assert.match(platform, /runQueue\(geminiQueue, GEMINI_STABLE_POLICY\.concurrency\)/);
-  assert.match(platform, /registerGeminiTransientFailure/);
-  assert.match(platform, /Gemini 单项目每日采集保护/);
+  assert.match(platform, /isGemini31Pro/);
+  assert.match(platform, /page === "batch"/);
+  assert.doesNotMatch(platform, /runModels\.filter\(model => !isGemini31Pro/);
+  assert.match(platform, /const pendingRunModels = runModels\.filter\(model => !launchedModelIds\.includes/);
+  assert.match(platform, /实时整组、连接测试和缺失项补齐均使用 Google 原生 generateContent 接口/);
+  assert.match(batchPanel, /Batch 每轮提交 2 个 item/);
+  assert.match(batchRoute, /rounds \* 2/);
+  assert.match(batchRoute, /parseColorBatchResponse/);
+  assert.match(batchRoute, /parseRatingVectorBatchResponse/);
+  assert.match(batchRoute, /grouped-round-v5/);
+  assert.match(batchBuilder, /GEMINI_WORD_GROUP_ID/);
+  assert.match(batchBuilder, /GEMINI_COLOR_GROUP_ID/);
   assert.match(modelTest, /usesGeminiStablePolicy/);
-  assert.match(pilotTest, /requestPilot/);
-  assert.match(sourceExport, /GEMINI_STABLE_POLICY\.id/);
+  assert.match(sourceExport, /collection_mode/);
 });
 
-test("caps Gemini at seven complete rounds per quota day and resumes by run index", async () => {
+test("keeps run indexes continuous without applying a Gemini-specific daily gate", async () => {
   const [platform, budget, workspaceRoute] = await Promise.all([
     readFile(new URL("../app/ExperimentPlatform.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/experiment/daily-budget.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/workspace/route.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(budget, /GEMINI_DAILY_COMPLETE_ROUNDS = 7/);
   assert.match(budget, /COMPLETE_ROUND_REQUESTS = 31/);
-  assert.match(budget, /America\/Los_Angeles/);
-  assert.match(budget, /word_count.*>= 20.*color_count.*>= 11/s);
-  assert.match(budget, /Math\.min\(remainingTargetRounds, remainingTodayRounds\)/);
-  assert.match(platform, /summarizeGeminiDailyBudget/);
   assert.match(platform, /createTrialQueue\(firstRunIndex, plans\)/);
   assert.match(platform, /跨日结果会按轮次自动合并/);
   assert.match(workspaceRoute, /FROM trial_manifest m/);
@@ -390,25 +394,27 @@ test("starts every new batch at the next unused run index and defaults exports t
   assert.match(workspaceRoute, /nextRunIndex/);
 });
 
-test("exports analysis panels as styled high-resolution PNG files", async () => {
-  const [exporter, task1, task2] = await Promise.all([
-    readFile(new URL("../app/analysis/export-png.ts", import.meta.url), "utf8"),
+test("exports standalone Matplotlib publication figures rather than dashboard snapshots", async () => {
+  const [client, server, renderer, task1, task2, bidirectional] = await Promise.all([
+    readFile(new URL("../app/analysis/python-figures.ts", import.meta.url), "utf8"),
+    readFile(new URL("../python_figures/server.py", import.meta.url), "utf8"),
+    readFile(new URL("../python_figures/publication.py", import.meta.url), "utf8"),
     readFile(new URL("../app/analysis/Task1VisualLab.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/analysis/Task2VisualLab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/BidirectionalVisualLab.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(exporter, /copyComputedStyles/);
-  assert.match(exporter, /document\.fonts\.ready/);
-  assert.match(exporter, /canvasToPng/);
-  assert.match(exporter, /elementToPngBlob/);
-  assert.match(exporter, /publicationMode/);
-  assert.match(exporter, /freezeInteractiveControls/);
-  assert.match(exporter, /data:image\/svg\+xml;charset=utf-8/);
-  assert.doesNotMatch(exporter, /createObjectURL\(new Blob\(\[svg\]/);
-  assert.match(exporter, /setTimeout\(\(\) => URL\.revokeObjectURL/);
-  assert.doesNotMatch(exporter, /document\.styleSheets/);
-  assert.match(task1, /downloadPublicationPng/);
-  assert.match(task2, /downloadElementPng/);
-  assert.match(task2, /downloadPublicationPng/);
+  assert.match(client, /renderPublicationFigure/);
+  assert.match(client, /PublicationFigureFormat = "png" \| "svg"/);
+  assert.match(server, /render_publication_figure/);
+  assert.match(server, /image\/svg\+xml/);
+  assert.match(renderer, /matplotlib\.use\("Agg"\)/);
+  assert.match(renderer, /"svg\.fonttype": "none"/);
+  assert.match(renderer, /"dpi"/);
+  assert.match(task1, /renderPublicationFigure/);
+  assert.match(task2, /renderPublicationFigure/);
+  assert.match(bidirectional, /renderPublicationFigure/);
+  assert.doesNotMatch(task1, /downloadPublicationPng/);
+  assert.doesNotMatch(task2, /downloadPublicationPng|downloadElementPng/);
 });
 
 test("matches the Python paper-style emotion facets and exports every dashboard view independently", async () => {
@@ -425,43 +431,39 @@ test("matches the Python paper-style emotion facets and exports every dashboard 
   assert.match(task1, /GEW_EMOTIONS\.filter/);
   assert.match(task1, /emotionFaceted/);
   assert.match(task1, /批量导出 \$\{availableEmotions\.length\} 个情绪 ZIP/);
-  assert.match(task1, /_HS_Faceted\.png|\"HS\" : \"VS\"/);
+  assert.match(task1, /20-emotions-\$\{exportStyle\.format\}/);
   assert.match(task1, /对应 hsvplot\.py/);
-  assert.match(task2, /导出此视图 PNG/);
+  assert.match(task2, /导出此科研图/);
   assert.match(task2, /Task2FigureExportContext/);
   assert.match(bidirectional, /FigureExportControls/);
-  assert.match(bidirectional, /VIEW_TITLES/);
+  assert.match(bidirectional, /VIEWS/);
   assert.match(controls, /每行分面/);
   assert.match(controls, /高精印刷 · 3×/);
   assert.match(controls, /保留标题与说明/);
   assert.match(styles, /--figure-columns/);
   assert.match(styles, /PYTHON PAPER STYLE|python-paper-view/);
-  assert.match(task1, /columns: 5, width: 2850/);
-  assert.match(task1, /renderPythonHsvPng/);
-  assert.match(task1, /Python 导出当前 PNG/);
-  assert.match(pythonClient, /127\.0\.0\.1:8765/);
+  assert.match(task1, /columns: 5, width: 4500/);
+  assert.match(task1, /renderPublicationFigure/);
+  assert.match(task1, /导出科研图/);
+  assert.match(pythonClient, /127\.0\.0\.1:8773/);
   assert.match(pythonPlot, /projection.*polar/);
   assert.match(pythonPlot, /sns\.color_palette\("husl"/);
   assert.match(pythonPlot, /target_width/);
   assert.match(packageJson, /scripts\/dev-local\.mjs/);
 });
 
-test("packages every available publication figure into a one-click PNG zip", async () => {
-  const [analysis, styles] = await Promise.all([
-    readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
-  ]);
+test("packages every available publication figure as native PNG and SVG", async () => {
+  const analysis = await readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8");
   assert.match(analysis, /exportPublicationFigures/);
   assert.match(analysis, /一键导出全部论文图表/);
-  assert.match(analysis, /publication-export-stage/);
-  assert.match(analysis, /elementToPngBlob/);
-  assert.match(analysis, /minimumWidth: 1_200/);
-  assert.match(analysis, /background: "#ffffff"/);
-  assert.match(analysis, /figures\/\$\{file\}/);
+  assert.match(analysis, /renderPublicationFigure/);
+  assert.match(analysis, /Matplotlib/);
+  assert.match(analysis, /\["png", "svg"\]/);
+  assert.match(analysis, /figures\/\$\{job\.scope\}/);
   assert.match(analysis, /图表目录\.csv/);
-  assert.match(analysis, /README_论文插图说明\.txt/);
-  assert.match(analysis, /全部论文图表PNG\.zip/);
-  assert.match(styles, /\.publication-export-stage/);
+  assert.match(analysis, /README\.txt/);
+  assert.match(analysis, /publication-figures_PNG_SVG\.zip/);
+  assert.doesNotMatch(analysis, /elementToPngBlob|publication-export-stage|document\.getElementById\("publication-export-stage"\)/);
 });
 
 test("exports a self-contained interactive HTML analysis report without credentials", async () => {
@@ -486,4 +488,55 @@ test("exports a self-contained interactive HTML analysis report without credenti
   assert.doesNotMatch(report, /MAX_RESULT_ROWS|slice\(0, MAX_RESULT_ROWS\)|truncated/);
   assert.doesNotMatch(report, /apiKey|Authorization|Bearer /);
   assert.doesNotMatch(report, /https?:\/\//);
+});
+
+test("explains filtered dashboard data and optionally reveals overlapping HSV observations", async () => {
+  const [platform, insights, task1, styles, visualStyles] = await Promise.all([
+    readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/DashboardInsights.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/Task1VisualLab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/analysis/visuals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(platform, /Task1Insights/);
+  assert.match(platform, /Task2Insights/);
+  assert.match(platform, /BidirectionalVisualLab/);
+  assert.match(insights, /规则计算 · 非生成式 AI/);
+  assert.match(insights, /描述性辅助阅读/);
+  assert.match(insights, /重叠诊断/);
+  assert.match(insights, /JSD 相似度/);
+  assert.match(task1, /导出重叠呈现/);
+  assert.match(task1, /空心计数气泡/);
+  assert.match(task1, /气泡面积编码/);
+  assert.match(task1, /密度 \/ hexbin/);
+  assert.match(task1, /overlapLayout/);
+  assert.match(task1, /显示位移不进入统计或导出数据/);
+  assert.match(task1, /overlap-count-label/);
+  assert.match(styles, /\.dashboard-insights/);
+  assert.match(visualStyles, /\.overlap-display-toggle/);
+  assert.match(visualStyles, /\.overlap-count-label/);
+});
+
+test("adds a leakage-safe phase-one machine learning workspace", async () => {
+  const analysis = await readFile(new URL("../app/AnalysisPlatform.tsx", import.meta.url), "utf8");
+  const lab = await readFile(new URL("../app/analysis/MachineLearningLab.tsx", import.meta.url), "utf8");
+  const python = await readFile(new URL("../python_figures/ml_analysis.py", import.meta.url), "utf8");
+  assert.match(analysis, /machine-learning/);
+  assert.match(analysis, /MachineLearningLab/);
+  assert.match(lab, /Cross-Generalization/);
+  assert.match(lab, /Human → AI/);
+  assert.match(python, /GroupKFold/);
+  assert.match(python, /train_groups & test_groups/);
+  assert.match(python, /predictions\[test\]/);
+  assert.match(python, /normalizedTransfer/);
+});
+
+test("keeps the task-two rating distribution as source rows by color columns", async () => {
+  const task2 = await readFile(new URL("../app/analysis/Task2VisualLab.tsx", import.meta.url), "utf8");
+  const python = await readFile(new URL("../python_figures/publication.py", import.meta.url), "utf8");
+  assert.match(task2, /8行×11列/);
+  assert.match(task2, /sourcesFor\("06"\)\.length\} 行 × \{colors\.length\} 列/);
+  assert.match(python, /nrows, columns = max\(1, len\(sources\)\), max\(1, len\(colors\)\)/);
+  assert.match(python, /axes\[source_index, color_index\]/);
+  assert.doesNotMatch(python, /columns = max\(1, min\(5, int\(options\.get\("columns"/);
 });

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnalysisPlatform } from "./AnalysisPlatform";
+import { GeminiBatchPanel } from "./GeminiBatchPanel";
 import { experimentOrders } from "./experiment/prompts";
 import {
   isDoubao21Pro,
@@ -79,6 +80,13 @@ type QueueTrial = {
   stimulusId: string;
   stimulusHex?: string;
   stimulusIndex: number;
+};
+
+type SubmissionGroup = {
+  model: Model;
+  task: "word" | "color";
+  runIndex: number;
+  trials: QueueTrial[];
 };
 
 type RunPlan = {
@@ -167,6 +175,7 @@ const COLORS = [
 const NAV = [
   ["setup", "01", "项目设置"], ["models", "02", "模型配置"],
   ["experiment", "03", "实验设计"], ["runner", "04", "实验运行"],
+  ["batch", "04B", "Gemini Batch"],
   ["review", "05", "数据审阅"], ["export", "06", "导出与归档"],
   ["analysis", "07", "数据分析"],
 ] as const;
@@ -179,12 +188,12 @@ const STATUS_LABELS: Record<string, string> = {
 const defaultProject: Project = {
   id: "ECX-2026-001", name: "Cross-model Emotion–Color Study", researcher: "Jianmo",
   description: "Standardized English-only comparison of AI emotion–color associations.", status: "Draft",
-  experiment_version: "1.0", emotion_list_version: "GEW-20 v1.0", color_list_version: "Munsell-11 v1.0",
+  experiment_version: "1.1-20x11", emotion_list_version: "GEW-20 v1.0", color_list_version: "Munsell-11 v1.0",
 };
 
 const defaultSettings: Settings = {
   repetitions: 100, run_word_to_color: true, run_color_to_emotion: true,
-  concurrency: 2, max_retry: 3, timeout_seconds: 60, save_raw: true,
+  concurrency: 2, max_retry: 3, timeout_seconds: 180, save_raw: true,
   prompt_seed_enabled: false, prompt_seed_base: 20260715,
   native_seed_enabled: false, prompt_variants_enabled: false,
   model_scope: "all", single_model_id: "model-gpt", model_slot_ids: '["model-gpt"]',
@@ -195,7 +204,7 @@ const defaultModels: Model[] = [
   { id: "model-gpt", provider: "OpenAI", alias: "GPT", model_id: "gpt-5.6", base_url: "https://api.openai.com/v1", api_format: "OpenAI Chat Completions", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
   { id: "model-deepseek", provider: "DeepSeek", alias: "DeepSeek", model_id: "deepseek-v4-pro", base_url: "https://api.deepseek.com", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
   { id: "model-doubao", provider: "ByteDance", alias: "Doubao", model_id: "doubao-seed-2-1-pro-260628", base_url: "https://ark.cn-beijing.volces.com/api/v3", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 60, enabled: true, last_test_status: "Not tested", latency_ms: null },
-  { id: "model-gemini", provider: "Google", alias: "Gemini", model_id: "gemini-3.1-pro-preview", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", api_format: "OpenAI-compatible", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 8, enabled: true, last_test_status: "Not tested", latency_ms: null },
+  { id: "model-gemini", provider: "Google", alias: "Gemini", model_id: "gemini-3.1-pro-preview", base_url: "https://generativelanguage.googleapis.com/v1beta", api_format: "Gemini native generateContent", max_tokens: 2048, temperature: 1, top_p: 1, supports_seed: false, supports_json: true, rate_limit: 8, enabled: true, last_test_status: "Not tested", latency_ms: null },
 ];
 
 const MODEL_VARIANTS = {
@@ -229,9 +238,11 @@ function variantsFor(model: Model) {
 }
 
 function modelVariantPatch(model: Model, modelId: string): Partial<Model> {
+  const gemini = /^gemini-3(?:\.|-)/i.test(modelId);
   return {
     model_id: modelId,
-    api_format: modelId.startsWith("gpt-5.6") ? "OpenAI Chat Completions" : model.api_format,
+    base_url: gemini ? "https://generativelanguage.googleapis.com/v1beta" : model.base_url,
+    api_format: gemini ? "Gemini native generateContent" : modelId.startsWith("gpt-5.6") ? "OpenAI Chat Completions" : model.api_format,
     supports_seed: modelId.startsWith("gpt-5.6") ? false : model.supports_seed,
     max_tokens: 2048,
     temperature: 1,
@@ -259,6 +270,16 @@ function executionSettingsForModel(model: Model, settings: Settings) {
 }
 function runGroupKey(modelId: string, runIndex: number) { return `${modelId}::${runIndex}`; }
 function isCompleteRunGroup(group: RunGroupSummary) { return Number(group.word_count) === 20 && Number(group.color_count) === 11; }
+function groupForSubmission(queue: QueueTrial[]) {
+  const groups = new Map<string, SubmissionGroup>();
+  queue.forEach(trial => {
+    const key = `${trial.model.id}\u0000${trial.task}\u0000${trial.runIndex}`;
+    const current = groups.get(key) || { model: trial.model, task: trial.task, runIndex: trial.runIndex, trials: [] };
+    current.trials.push(trial);
+    groups.set(key, current);
+  });
+  return [...groups.values()];
+}
 function modelSlotIds(settings: Settings, models: Model[]) {
   if (settings.model_scope === "single") return [settings.single_model_id].filter(Boolean);
   if (settings.model_scope === "slots") {
@@ -358,6 +379,7 @@ export function ExperimentPlatform() {
   }, [page]);
 
   const selectedModel = models.find(m => m.id === selectedModelId) || models[0];
+  const geminiBatchModel = models.find(model => isGemini31Pro(model.model_id));
   const selectedRunModelIds = modelSlotIds(settings, models);
   const runModels = models.filter(model => selectedRunModelIds.includes(model.id)).slice(0, 4);
   const pendingRunModels = runModels.filter(model => !launchedModelIds.includes(model.id));
@@ -842,59 +864,57 @@ export function ExperimentPlatform() {
       setGeminiRunState({ status: "running", consecutiveFailures: 0, cooldownUntil: 0 });
     }
 
-    async function executeTrial(item: QueueTrial) {
+    async function executeGroup(group: SubmissionGroup) {
       let lastMessage = "试次执行失败。";
-      const attemptLimit = totalAttemptLimit(item.model, settings.max_retry);
-      const modelTimeoutSeconds = effectiveTimeoutSeconds(item.model, settings.timeout_seconds);
+      const attemptLimit = totalAttemptLimit(group.model, settings.max_retry);
+      // A complete 20- or 11-question JSON response is materially larger than
+      // the former single-item call.  Keep the normal queue policy, but never
+      // abort a valid grouped response merely because an older saved setting
+      // still contains the 60-second single-question default.
+      const modelTimeoutSeconds = Math.max(180, effectiveTimeoutSeconds(group.model, settings.timeout_seconds));
       for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
-        await waitForGeminiCooldown(item.model);
-        setRunActivity(`${item.model.alias} · 第 ${item.runIndex} 轮 · ${item.stimulusId} · ${attempt ? `第 ${attempt} 次重试` : "请求中"}`);
-        if (usesGeminiStablePolicy(item.model)) {
+        await waitForGeminiCooldown(group.model);
+        setRunActivity(`${group.model.alias} · 第 ${group.runIndex} 轮 · ${group.task === "word" ? "实验一 20 题整组" : "实验二 11 题整组"} · ${attempt ? `第 ${attempt} 次重试` : "请求中"}`);
+        if (usesGeminiStablePolicy(group.model)) {
           setGeminiRunState(current => ({ ...current, status: "running" }));
         }
-        await waitForRateLimit(item.model);
+        await waitForRateLimit(group.model);
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), (modelTimeoutSeconds + 5) * 1000);
         try {
-          const response = await fetch("/api/run-trial", {
+          const response = await fetch("/api/run-group", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             signal: controller.signal,
             body: JSON.stringify({
-              apiKey: keys[item.model.id],
-              model: item.model,
-              settings: executionSettingsForModel(item.model, settings),
-              trial: {
-                task: item.task,
-                runIndex: item.runIndex,
-                stimulusId: item.stimulusId,
-                stimulusHex: item.stimulusHex,
-                stimulusIndex: item.stimulusIndex,
-              },
+              apiKey: keys[group.model.id],
+              model: group.model,
+              settings: executionSettingsForModel(group.model, settings),
+              trials: group.trials.map(item => ({ task: item.task, runIndex: item.runIndex, stimulusId: item.stimulusId, stimulusHex: item.stimulusHex, stimulusIndex: item.stimulusIndex })),
               retryCount: attempt,
             }),
           });
-          const data = await response.json().catch(() => ({})) as { ok?: boolean; result?: ResultRow; message?: string; retryAfter?: string | null; retryable?: boolean; httpStatus?: number };
-          if (response.ok && data.ok && data.result) {
-            registerGeminiSuccess(item.model);
-            return data.result;
+          const data = await response.json().catch(() => ({})) as { ok?: boolean; results?: ResultRow[]; message?: string; retryAfter?: string | null; retryable?: boolean; httpStatus?: number };
+          if (response.ok && data.ok && data.results?.length === group.trials.length) {
+            registerGeminiSuccess(group.model);
+            return data.results;
           }
           lastMessage = data.message || `请求失败（HTTP ${response.status}）`;
           if (data.retryable === false) break;
           const transient = response.status === 408 || response.status === 429 || response.status >= 500;
-          if (transient) registerGeminiTransientFailure(item.model);
+          if (transient) registerGeminiTransientFailure(group.model);
           if (attempt < attemptLimit - 1) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
-            await wait(retryDelayMilliseconds(item.model, attempt, data.retryAfter));
+            await wait(retryDelayMilliseconds(group.model, attempt, data.retryAfter));
           }
         } catch (error) {
           lastMessage = error instanceof DOMException && error.name === "AbortError"
             ? `请求超过 ${modelTimeoutSeconds} 秒未完成`
             : error instanceof Error ? error.message : "网络请求失败。";
-          registerGeminiTransientFailure(item.model);
+          registerGeminiTransientFailure(group.model);
           if (attempt < attemptLimit - 1) {
             setRunStats(current => ({ ...current, retries: current.retries + 1 }));
-            await wait(retryDelayMilliseconds(item.model, attempt));
+            await wait(retryDelayMilliseconds(group.model, attempt));
           }
         } finally {
           window.clearTimeout(timeoutId);
@@ -903,7 +923,7 @@ export function ExperimentPlatform() {
       throw new Error(lastMessage);
     }
 
-    async function runQueue(targetQueue: QueueTrial[], workerCount: number) {
+    async function runQueue(targetQueue: SubmissionGroup[], workerCount: number) {
       let cursor = 0;
       async function worker() {
       while (cursor < targetQueue.length) {
@@ -913,20 +933,22 @@ export function ExperimentPlatform() {
         cursor += 1;
         setRunStats(current => ({ ...current, active: current.active + 1 }));
         try {
-          const result = await executeTrial(item);
-          setResults(current => [result, ...current.filter(row => row.trial_id !== result.trial_id)]);
-          setRunStats(current => ({ ...current, completed: current.completed + 1, valid: current.valid + 1, latencyTotal: current.latencyTotal + result.latency_ms }));
+          const results = await executeGroup(item);
+          setResults(current => [...results, ...current.filter(row => !results.some(result => result.trial_id === row.trial_id))]);
+          const taskCount = results.length;
+          setRunStats(current => ({ ...current, completed: current.completed + taskCount, valid: current.valid + taskCount, latencyTotal: current.latencyTotal + results.reduce((sum, result) => sum + result.latency_ms, 0) }));
           setModelRunProgress(current => {
             const previous = current[item.model.id] || { completed: 0, valid: 0, word: 0, color: 0 };
-            return { ...current, [item.model.id]: { ...previous, completed: previous.completed + 1, valid: previous.valid + 1, [item.task]: previous[item.task] + 1 } };
+            return { ...current, [item.model.id]: { ...previous, completed: previous.completed + taskCount, valid: previous.valid + taskCount, [item.task]: previous[item.task] + taskCount } };
           });
         } catch (error) {
-          const message = `${item.model.alias} · 第 ${item.runIndex} 轮 · ${item.stimulusId}：${error instanceof Error ? error.message : "执行失败"}`;
+          const taskCount = item.trials.length;
+          const message = `${item.model.alias} · 第 ${item.runIndex} 轮 · ${item.task === "word" ? "实验一整组" : "实验二整组"}：${error instanceof Error ? error.message : "执行失败"}`;
           setLastRunError(message);
-          setRunStats(current => ({ ...current, completed: current.completed + 1, failed: current.failed + 1 }));
+          setRunStats(current => ({ ...current, completed: current.completed + taskCount, failed: current.failed + taskCount }));
           setModelRunProgress(current => {
             const previous = current[item.model.id] || { completed: 0, valid: 0, word: 0, color: 0 };
-            return { ...current, [item.model.id]: { ...previous, completed: previous.completed + 1, [item.task]: previous[item.task] + 1 } };
+            return { ...current, [item.model.id]: { ...previous, completed: previous.completed + taskCount, [item.task]: previous[item.task] + taskCount } };
           });
         } finally {
           setRunStats(current => ({ ...current, active: Math.max(0, current.active - 1) }));
@@ -936,8 +958,9 @@ export function ExperimentPlatform() {
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
     }
 
-    const geminiQueue = queue.filter(item => usesGeminiStablePolicy(item.model));
-    const standardQueue = queue.filter(item => !usesGeminiStablePolicy(item.model));
+    const submissionQueue = groupForSubmission(queue);
+    const geminiQueue = submissionQueue.filter(item => usesGeminiStablePolicy(item.model));
+    const standardQueue = submissionQueue.filter(item => !usesGeminiStablePolicy(item.model));
     const standardModelCount = new Set(standardQueue.map(item => item.model.id)).size;
     const standardWorkerCount = standardQueue.length
       ? Math.min(standardQueue.length, Math.max(1, Math.min(4, settings.concurrency, standardModelCount)))
@@ -979,12 +1002,31 @@ export function ExperimentPlatform() {
   }
 
   async function fetchExportPayload() {
-    const response = await fetch("/api/export-data", { cache: "no-store" });
-    if (!response.ok) throw new Error("导出数据读取失败");
-    const payload = await response.json() as ExportPayload;
     const eligibleGroups = includeIncompleteExports ? groupSummaries : groupSummaries.filter(isCompleteRunGroup);
     const eligibleKeys = eligibleGroups.map(group => runGroupKey(group.model_id, group.run_index));
     const selected = new Set(selectedExportGroups === null ? eligibleKeys : selectedExportGroups.filter(key => eligibleKeys.includes(key)));
+    const selectedGroups = eligibleGroups.filter(group => selected.has(runGroupKey(group.model_id, group.run_index)));
+    // D1 has a bound-parameter ceiling. Sending 300+ selected groups in one
+    // request produced an HTTP 500 (two bindings per group). Query in small,
+    // deterministic chunks and merge the same immutable metadata locally.
+    const chunks = Array.from({ length: Math.max(1, Math.ceil(selectedGroups.length / 40)) }, (_, index) => selectedGroups.slice(index * 40, (index + 1) * 40));
+    const payloads = await Promise.all(chunks.map(async groups => {
+      const params = new URLSearchParams();
+      params.set("scope", "selected");
+      groups.forEach(group => params.append("group", `${group.model_id}\t${group.run_index}`));
+      const response = await fetch(`/api/export-data?${params.toString()}`, { cache: "no-store" });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(detail || `导出数据读取失败（HTTP ${response.status}）`);
+      }
+      return response.json() as Promise<ExportPayload>;
+    }));
+    const payload = {
+      ...payloads[0],
+      results: payloads.flatMap(item => item.results),
+      failures: payloads.flatMap(item => item.failures ?? []),
+      manifest: payloads.flatMap(item => item.manifest ?? []),
+    } as ExportPayload;
     return {
       ...payload,
       export_scope: includeIncompleteExports ? "available" as const : "complete" as const,
@@ -1006,8 +1048,8 @@ export function ExperimentPlatform() {
       const filename = kind === "word" ? "word_to_color_source.csv" : "color_to_emotion_source.csv";
       download(filename, toCsv(rows, columns), "text/csv;charset=utf-8");
       setNotice(`已导出 ${rows.length.toLocaleString()} 行源格式结果；仅包含当前勾选的完整轮次。`);
-    } catch {
-      setNotice("导出失败，请确认本地数据库已初始化后重试。");
+    } catch (error) {
+      setNotice(`导出失败：${error instanceof Error ? error.message : "请确认本地数据库已初始化后重试。"}`);
     } finally {
       setExporting("");
       window.setTimeout(() => setNotice(""), 3200);
@@ -1040,8 +1082,8 @@ export function ExperimentPlatform() {
       const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
       XLSX.writeFile(workbook, `SurveyResponse_AI_${safeName}_${date}.xlsx`, { compression: true });
       setNotice(`样本格式工作簿已生成，共 ${sampleRows.length.toLocaleString()} 条合并观察。`);
-    } catch {
-      setNotice("样本格式工作簿生成失败，请稍后重试。");
+    } catch (error) {
+      setNotice(`样本格式工作簿生成失败：${error instanceof Error ? error.message : "请稍后重试。"}`);
     } finally {
       setExporting("");
       window.setTimeout(() => setNotice(""), 3200);
@@ -1071,8 +1113,8 @@ export function ExperimentPlatform() {
       const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
       XLSX.writeFile(workbook, `多模型实验结果_${date}.xlsx`, { compression: true });
       setNotice(`原始多模型格式工作簿已生成：词选色 ${wordRows.length} 行、色选词 ${colorRows.length} 行；试次清单和补齐记录已附上。`);
-    } catch {
-      setNotice("原始多模型格式工作簿生成失败，请稍后重试。");
+    } catch (error) {
+      setNotice(`原始多模型格式工作簿生成失败：${error instanceof Error ? error.message : "请稍后重试。"}`);
     } finally {
       setExporting("");
       window.setTimeout(() => setNotice(""), 3200);
@@ -1100,7 +1142,7 @@ export function ExperimentPlatform() {
       <main>
         <header className="topbar">
           <div className="breadcrumbs">AI 实验 <span>/</span> {NAV.find(n => n[0] === page)?.[2]}</div>
-          <div className="top-actions"><Pill tone="green">冻结运行版 · 2026-07-31</Pill><Pill tone={project.status === "Running" ? "blue" : "amber"}>{STATUS_LABELS[project.status] || project.status}</Pill><button className="icon-button" aria-label="通知">◌</button><div className="avatar">JM</div></div>
+          <div className="top-actions"><Pill tone="green">全部模型整组提交 · Gemini Batch v5</Pill><Pill tone={project.status === "Running" ? "blue" : "amber"}>{STATUS_LABELS[project.status] || project.status}</Pill><button className="icon-button" aria-label="通知">◌</button><div className="avatar">JM</div></div>
         </header>
         {notice ? <div className="toast">{notice}<button onClick={() => setNotice("")}>×</button></div> : null}
         {loading ? <div className="loading-line" /> : null}
@@ -1110,6 +1152,7 @@ export function ExperimentPlatform() {
           {page === "models" && <ModelsPage models={models} selected={selectedModel} select={setSelectedModelId} patch={patchModel} save={saveModel} apiKey={keys[selectedModel.id] || ""} setKey={setKey} testing={testing} test={testConnection} pilotTesting={pilotTesting} pilotTest={pilotTest} prepareSingle={() => prepareSingleModel(selectedModel.id)} />}
           {page === "experiment" && <ExperimentPage settings={settings} setSettings={setSettings} models={models} activeModels={runModels} launchedModelIds={launchedModelIds} running={runnerState === "running"} wtc={wtcRequests} cte={cteRequests} total={totalRequests} build={buildQueue} />}
           {page === "runner" && <RunnerPage state={runnerState} setState={changeRunnerState} start={startRun} pendingCount={pendingRunModels.length} total={runnerRequestTotal} stats={runStats} modelProgress={modelRunProgress} plannedRoundsByModel={plannedRoundsByModel} settings={settings} models={runModels} launchedModelIds={launchedModelIds} keys={keys} lastError={lastRunError} activity={runActivity} geminiRunState={geminiRunState} geminiDailyBudgets={geminiDailyBudgets} repairCount={repairTrials.length} repairExhaustedCount={repairExhaustedCount} repairChecking={repairChecking} repairing={repairing} scanMissing={() => scanMissingTrials(runModels.map(model => model.id))} repairMissing={repairMissingTrials} />}
+          {page === "batch" && <GeminiBatchPanel model={geminiBatchModel} apiKey={geminiBatchModel ? keys[geminiBatchModel.id] || "" : ""} settings={settings as unknown as Record<string, unknown> & { repetitions: number }} />}
           {page === "review" && <ReviewPage results={filteredResults} failures={recentFailures} models={models} groupSummaries={groupSummaries} filterTask={filterTask} setFilterTask={setFilterTask} filterModel={filterModel} setFilterModel={setFilterModel} />}
           {page === "export" && <ExportPage project={project} results={results} expectedGroups={settings.repetitions * runModels.length} groupSummaries={groupSummaries} selectedGroups={selectedExportGroups} setSelectedGroups={setSelectedExportGroups} includeIncomplete={includeIncompleteExports} setIncludeIncomplete={setIncludeIncompleteExports} exporting={exporting} exportConfig={exportConfig} exportCsv={exportCsv} exportSourceCsv={exportSourceCsv} exportSampleWorkbook={exportSampleWorkbook} exportSourceWorkbook={exportSourceWorkbook} />}
           {page === "analysis" && <AnalysisPlatform />}
@@ -1186,7 +1229,7 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
             <div className="version-picker-head"><div><span className="eyebrow">具体模型型号</span><b>选择 Flash、Pro 或其他版本</b></div><Pill tone="blue">当前：{selected.model_id}</Pill></div>
             <div className="variant-chips">{variants.map(([label, id]) => <button type="button" key={id} className={selected.model_id === id ? "active" : ""} onClick={() => patch(modelVariantPatch(selected, id))}><b>{label}</b><small>{id}</small></button>)}</div>
             <label>自定义 Model ID<input className="mono" value={selected.model_id} onChange={e => patch({ model_id: e.target.value })} /></label>
-            <small className="version-note">{gemini36 ? "Gemini 3.6 Flash 为稳定版；该型号已弃用 Temperature 与 Top P，平台会按接口要求省略。" : gemini31Pro ? "Gemini 3.1 Pro 当前为 Preview 且不提供免费 API 层；平台固定 Temperature 1.0、Top P 1.0、low thinking 与严格 JSON Schema，并通过独立稳定采集通道运行。" : doubao21Pro ? "Doubao-Seed-2.1-Pro 为文本深度思考模型；本实验固定关闭深度思考。若控制台提供的是推理接入点，请将 Model ID 改为对应的 ep-… ID。" : "列表是快捷选择，也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。"}</small>
+            <small className="version-note">{gemini36 ? "Gemini 3.6 Flash 为稳定版；该型号已弃用 Temperature 与 Top P，平台会按接口要求省略。" : gemini31Pro ? "Gemini 3.1 Pro 当前为 Preview 且不提供免费 API 层；实时整组、连接测试和缺失项补齐均使用 Google 原生 generateContent 接口，Batch 继续使用原生 Batch API。实时路径要求 JSON 输出并在本地严格校验，避免 Preview 的嵌套 Schema 400。两种方式均固定 Temperature 1.0、Top P 1.0、2048 Token 与 low thinking。" : doubao21Pro ? "Doubao-Seed-2.1-Pro 为文本深度思考模型；本实验固定关闭深度思考。若控制台提供的是推理接入点，请将 Model ID 改为对应的 ep-… ID。" : "列表是快捷选择，也可以直接粘贴服务商控制台提供的 Model ID。火山引擎如使用推理接入点，请填对应的 ep-… ID。"}</small>
           </div>
           <label className="span-2">接口地址 Base URL<input className="mono" value={selected.base_url} onChange={e => patch({ base_url: e.target.value })} /></label>
           <label className="span-2">临时 API Key<div className="secret-field"><input type="password" value={apiKey} placeholder="sk-••••••••••••••••" autoComplete="off" onChange={e => setKey(e.target.value)} /><span>仅本次会话</span></div><small className="field-note">传输过程加密，绝不写入项目数据库或导出文件。</small></label>
@@ -1199,7 +1242,7 @@ function ModelsPage({ models, selected, select, patch, save, apiKey, setKey, tes
             </div>
             {gemini36
               ? <div className="parameter-notice"><b>Gemini 3.6 采样策略</b><span>Temperature / Top P 已弃用，平台会完全省略这两个字段；推理模式固定为 low。</span></div>
-              : <div className="parameter-notice"><b>{gemini31Pro ? "Gemini 稳定测试组合" : "统一实验协议"}</b><span>{gemini31Pro ? "Temperature 1.0 · Top P 1.0 · 2048 Token · low thinking · 并发 1 · 8 RPM · 90 秒超时 · 5/20/60 秒长退避 · 连续 3 次临时失败冷却 180 秒" : `Temperature 1.0 · Top P 1.0 · 2048 Token · 推理模式 ${reasoningMode}`}</span></div>}
+              : <div className="parameter-notice"><b>{gemini31Pro ? "Gemini 双采集入口" : "统一实验协议"}</b><span>{gemini31Pro ? "实时整组：与其他模型同队列 · Native Batch：在独立页面提交；两者均为 Temperature 1.0 · Top P 1.0 · 2048 Token · low thinking" : `Temperature 1.0 · Top P 1.0 · 2048 Token · 推理模式 ${reasoningMode}`}</span></div>}
           </div>
           <label>每分钟请求上限<input type="number" value={usesGeminiStablePolicy(selected) ? GEMINI_STABLE_POLICY.requestsPerMinute : selected.rate_limit} disabled={usesGeminiStablePolicy(selected)} onChange={e => patch({ rate_limit: number(e.target.value) })} />{usesGeminiStablePolicy(selected) ? <small>Gemini 稳定通道固定为 8 RPM。</small> : null}</label>
         </div>
@@ -1237,15 +1280,15 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
       <section className="task-column">
         <div className={`task-card ${bool(settings.run_word_to_color) ? "active" : ""}`}>
           <div className="task-card-head"><span className="task-index">A</span><div><span className="eyebrow">任务一</span><h3>词选色 Word → Color</h3></div><Toggle checked={bool(settings.run_word_to_color)} onChange={v => patch({ run_word_to_color: v })} label="词选色" disabled={running} /></div>
-          <p>每次将一个英文情绪词放入独立上下文，模型返回一个最直觉相关的 sRGB HEX 颜色。</p>
-          <pre><span>输入</span> “Admiration”{`\n`}<span>输出</span> {`{ "hex": "#6A5ACD" }`}</pre>
-          <div className="task-math"><span>20 个情绪</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{wtc.toLocaleString()} 个请求</b></div>
+          <p>每轮将 20 个英文情绪词以随机顺序放入同一请求；模型为每个词独立返回一个最直觉相关的 sRGB HEX 颜色。</p>
+          <pre><span>输入</span> 20 个乱序情绪词{`\n`}<span>输出</span> {`{ "Admiration": { "hex": "#6A5ACD" }, … }`}</pre>
+          <div className="task-math"><span>20 个情绪</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{Math.ceil(wtc / 20).toLocaleString()} 个整组请求</b></div>
         </div>
         <div className={`task-card ${bool(settings.run_color_to_emotion) ? "active" : ""}`}>
           <div className="task-card-head"><span className="task-index">B</span><div><span className="eyebrow">任务二</span><h3>色选词 Color → Emotion</h3></div><Toggle checked={bool(settings.run_color_to_emotion)} onChange={v => patch({ run_color_to_emotion: v })} label="色选词" disabled={running} /></div>
-          <p>Prompt 提供匿名颜色 ID、HEX 与乱序情绪词表；模型可选择其中部分或全部情绪，并为每个已选情绪填写 1–5 共 5 级关联强度。</p>
-          <pre><span>输入</span> C9 · #FFBC00 · 20 个乱序情绪{`\n`}<span>输出</span> {`{ "associations": [{ "emotion": "Joy", "intensity": 5 }] }`}</pre>
-          <div className="task-math"><span>11 个颜色</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{cte.toLocaleString()} 个请求</b></div>
+          <p>每轮将 11 个匿名颜色题以随机顺序放入同一请求；每题可选择部分或全部情绪，并为每个已选情绪填写 1–5 共 5 级关联强度。</p>
+          <pre><span>输入</span> 11 个乱序颜色题{`\n`}<span>输出</span> {`{ "C9": { "associations": [{ "emotion": "Joy", "intensity": 5 }] }, … }`}</pre>
+          <div className="task-math"><span>11 个颜色</span><i>×</i><span>{settings.repetitions} 次</span><i>×</i><span>{activeModels.length} 个模型</span><b>{Math.ceil(cte / 11).toLocaleString()} 个整组请求</b></div>
         </div>
       </section>
       <aside className="configuration-panel panel">
@@ -1262,7 +1305,7 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
         <label className="range-label"><span>每个模型的完整实验轮次<b>{settings.repetitions} 组</b></span><input type="range" min="1" max="100" value={settings.repetitions} disabled={running} onChange={e => patch({ repetitions: number(e.target.value) })} /><small><span>1 组测试数据</span><span>100 组正式数据</span></small></label>
         <div className="repetition-presets"><span>快速设置</span>{[1, 10, 50, 100].map(value => <button type="button" key={value} disabled={running} className={settings.repetitions === value ? "active" : ""} onClick={() => patch({ repetitions: value })}>{value} 组</button>)}</div>
         {hasGemini ? <div className="daily-budget-note"><b>Gemini 将按天续跑</b><span>目标仍是每个模型 {settings.repetitions} 个完整轮次；3001 每个配额日最多启动 {GEMINI_DAILY_COMPLETE_ROUNDS} 轮（{GEMINI_DAILY_FORMAL_REQUESTS} 条正式请求），第二天点击继续即可，已有轮次不会重复。</span></div> : null}
-        <div className="compact-fields"><label>并行模型组<input type="number" readOnly value={activeModels.length} /></label><label>总重试上限（含补齐）<input type="number" min="0" max="5" disabled={running} value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" disabled={running} value={settings.timeout_seconds} onChange={e => patch({ timeout_seconds: number(e.target.value) })} /></label></div>
+        <div className="compact-fields"><label>并行模型组<input type="number" readOnly value={activeModels.length} /></label><label>总重试上限（含补齐）<input type="number" min="0" max="5" disabled={running} value={settings.max_retry} onChange={e => patch({ max_retry: number(e.target.value) })} /></label><label>超时（秒）<input type="number" min="180" disabled={running} value={Math.max(180, settings.timeout_seconds)} onChange={e => patch({ timeout_seconds: Math.max(180, number(e.target.value)) })} /></label></div>
         <div className="order-controls">
           <div className="strategy-title"><div><span className="eyebrow">呈现顺序</span><b>可复现乱序</b></div><small>按基础 Seed 确定每轮顺序</small></div>
           <div className={bool(settings.shuffle_emotion_order) ? "order-row active" : "order-row"}><span>实验一</span><div><b>20 个情绪询问顺序乱序</b><small>每轮以不同顺序逐个询问情绪词，降低固定位置偏差。</small></div><Toggle checked={bool(settings.shuffle_emotion_order)} onChange={v => patch({ shuffle_emotion_order: v })} label="实验一情绪顺序乱序" disabled={running} /></div>
@@ -1275,14 +1318,14 @@ function ExperimentPage({ settings, setSettings, models, activeModels, launchedM
             <span>A</span><div><b>提示词随机种子</b><small>在 Prompt 末尾附加可复现的 Seed 标签。</small>{bool(settings.prompt_seed_enabled) ? <label>基础 Seed<input type="number" disabled={running} value={settings.prompt_seed_base} onChange={e => patch({ prompt_seed_base: number(e.target.value) })} /></label> : null}</div><Toggle checked={bool(settings.prompt_seed_enabled)} onChange={v => patch({ prompt_seed_enabled: v })} label="提示词随机种子" disabled={running} />
           </div>
           <div className={bool(settings.native_seed_enabled) ? "strategy-row active" : "strategy-row"}>
-            <span>B</span><div><b>模型原生 Seed</b><small>向支持 Seed 的接口发送同一试次种子；不支持时明确记录。</small><em>{activeModels.filter(model => bool(model.supports_seed)).length} / {activeModels.length} 个本次模型声明支持</em></div><Toggle checked={bool(settings.native_seed_enabled)} onChange={v => patch({ native_seed_enabled: v })} label="模型原生 Seed" disabled={running} />
+          <span>B</span><div><b>模型原生 Seed</b><small>向支持 Seed 的接口发送同一完整轮次种子；不支持时明确记录。</small><em>{activeModels.filter(model => bool(model.supports_seed)).length} / {activeModels.length} 个本次模型声明支持</em></div><Toggle checked={bool(settings.native_seed_enabled)} onChange={v => patch({ native_seed_enabled: v })} label="模型原生 Seed" disabled={running} />
           </div>
           <div className={bool(settings.prompt_variants_enabled) ? "strategy-row active" : "strategy-row"}>
             <span>C</span><div><b>等价提示词轮换</b><small>按 Seed 在 3 个语义等价的 JSON 指令间确定性轮换。</small></div><Toggle checked={bool(settings.prompt_variants_enabled)} onChange={v => patch({ prompt_variants_enabled: v })} label="等价提示词轮换" disabled={running} />
           </div>
         </div>
         <div className="locked-list"><span className="eyebrow">已锁定条件</span>{[["实验语言", "English"], ["文化角色设定", "无"], ["输入形式", "仅文本"], ["上下文", "相互独立"], ["原始响应", "保存"]].map(([a,b]) => <div key={a}><span>{a}</span><b>{b}</b><i>⌑</i></div>)}</div>
-        <div className="queue-summary"><span>预计独立数据组</span><strong>{completeGroups.toLocaleString()}</strong><p>{completeGroupMode ? `${settings.repetitions} 轮 × ${activeModels.length} 个模型实验组；每组严格包含 20 个词选色 + 11 个色选词` : "只有同时启用实验一和实验二，才会形成可导出的完整数据组"}</p><div><span>每个模型按独立轮次保存</span><span>合计 {total.toLocaleString()} 个 API 请求</span></div><div><span>{wtc.toLocaleString()} 词选色请求</span><span>{cte.toLocaleString()} 色选词请求</span></div></div>
+        <div className="queue-summary"><span>预计独立数据组</span><strong>{completeGroups.toLocaleString()}</strong><p>{completeGroupMode ? `${settings.repetitions} 轮 × ${activeModels.length} 个模型实验组；每组严格包含 20 个词选色 + 11 个色选词` : "只有同时启用实验一和实验二，才会形成可导出的完整数据组"}</p><div><span>每个模型按独立轮次保存</span><span>合计 {(Math.ceil(wtc / 20) + Math.ceil(cte / 11)).toLocaleString()} 个 API 请求</span></div><div><span>{Math.ceil(wtc / 20).toLocaleString()} 个词选色整组请求</span><span>{Math.ceil(cte / 11).toLocaleString()} 个色选词整组请求</span></div></div>
         <button className="primary full" disabled={!total} onClick={build}>{running ? "保存新增组并返回运行页" : completeGroupMode ? `生成 ${completeGroups.toLocaleString()} 组独立数据` : "生成单任务队列（不计完整数据组）"} <span>→</span></button>
       </aside>
     </div>
