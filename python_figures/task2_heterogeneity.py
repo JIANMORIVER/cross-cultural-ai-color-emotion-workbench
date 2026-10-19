@@ -211,7 +211,7 @@ def _cluster_population(x: np.ndarray, sources: np.ndarray, units: np.ndarray, r
                 tick(f"{population} · {representation} · K={k} 稳定性", 1)
         validations.append({
             "population": population, "representation": representation, "k": k, "n": len(x), "pcaComponents": n_components,
-            "explainedVariance": float(np.sum(model.explained_variance_ratio_[:n_components])), "silhouette": silhouette,
+            "explainedVariance": float(np.nansum(model.explained_variance_ratio_[:n_components])), "silhouette": silhouette,
             "withinDispersion": dispersion, "betweenSeparation": separation, "minClusterSize": int(min(Counter(labels).values())),
             "stabilityMeanAri": float(np.mean(ari_values)) if ari_values else None,
             "stabilityCiLow": float(np.quantile(ari_values, .025)) if ari_values else None,

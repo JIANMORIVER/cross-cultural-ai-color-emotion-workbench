@@ -27,6 +27,27 @@ FILES = {
     "DeepSeek": "deepseek.xlsx", "Doubao": "doubao.xlsx", "GPT": "gpt.xlsx", "Gemini": "gemini.xlsx",
 }
 HUMANS = {"CN", "BW", "UK", "US"}
+EMOTION_LOOKUP = {emotion.casefold(): emotion for emotion in EMOTIONS}
+NO_ASSOCIATION_LABELS = {"none", "other", "n/a", "na", "无", "无关联", "其他"}
+
+
+def normalize_emotion(value: Any) -> str | None:
+    """Match Task 2 emotion labels case-insensitively.
+
+    Human survey exports use lower-case labels while AI exports normally use
+    title case.  Known no-association sentinels are valid but do not become a
+    GEW emotion.  Any other label is rejected so malformed input cannot be
+    silently converted into an all-zero profile.
+    """
+    label = str(value or "").strip()
+    if not label:
+        return None
+    canonical = EMOTION_LOOKUP.get(label.casefold())
+    if canonical:
+        return canonical
+    if label.casefold() in NO_ASSOCIATION_LABELS:
+        return None
+    raise ValueError(f"emotion outside the fixed GEW list: {label!r}")
 
 
 def parse_associations(value: Any) -> list[dict[str, Any]] | None:
@@ -45,19 +66,27 @@ def parse_associations(value: Any) -> list[dict[str, Any]] | None:
             except (ValueError, SyntaxError):
                 return None
     if isinstance(parsed, dict):
-        parsed = parsed.get("associations", parsed.get("emotions", parsed.get("answers")))
+        wrapped = parsed.get("associations", parsed.get("emotions", parsed.get("answers")))
+        parsed = wrapped if wrapped is not None else [
+            {"emotion": emotion, "intensity": intensity}
+            for emotion, intensity in parsed.items()
+        ]
     if not isinstance(parsed, list):
-        return None
+        raise ValueError("association JSON must be a list or an emotion-to-intensity object")
     output = []
     for item in parsed:
         if not isinstance(item, dict):
+            raise ValueError("every association entry must be a JSON object")
+        emotion = normalize_emotion(item.get("emotion", item.get("word", item.get("name", ""))))
+        if emotion is None:
             continue
-        emotion = str(item.get("emotion", "")).strip()
         try:
-            intensity = int(round(float(item.get("intensity", 0))))
+            intensity = int(round(float(item.get("intensity", item.get("score", item.get("value", 0))))))
         except (TypeError, ValueError):
-            continue
-        if emotion in EMOTIONS and 1 <= intensity <= 5:
+            raise ValueError(f"invalid intensity for {emotion!r}") from None
+        if not 0 <= intensity <= 5:
+            raise ValueError(f"intensity outside 0-5 for {emotion!r}: {intensity}")
+        if intensity > 0:
             output.append({"emotion": emotion, "intensity": intensity})
     return output
 
@@ -80,7 +109,7 @@ def load_rows(input_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         columns = {color: find_column(frame, [f"word_data.{color}"]) for color in COLORS}
         if not any(columns.values()):
             raise ValueError(f"{file_name} does not contain word_data.<color> columns")
-        valid_cells = invalid_cells = 0
+        valid_cells = invalid_cells = recognized_associations = zero_association_cells = 0
         cohort = "human" if source in HUMANS else "ai"
         for row_index, record in frame.iterrows():
             if not any(column and pd.notna(record.get(column)) and str(record.get(column)).strip() for column in columns.values()):
@@ -90,9 +119,17 @@ def load_rows(input_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             unit = participant if cohort == "human" and participant else run if cohort == "ai" and run else str(row_index + 1)
             for color in COLORS:
                 column = columns[color]
-                associations = parse_associations(record.get(column)) if column else None
+                try:
+                    associations = parse_associations(record.get(column)) if column else None
+                except ValueError as error:
+                    raise ValueError(
+                        f"{file_name} · Excel row {int(row_index) + 2} · {column}: {error}"
+                    ) from error
                 valid = associations is not None
                 valid_cells += int(valid); invalid_cells += int(not valid)
+                if valid:
+                    recognized_associations += len(associations)
+                    zero_association_cells += int(len(associations) == 0)
                 mapping = {item["emotion"]: item["intensity"] for item in associations or []}
                 for emotion in EMOTIONS:
                     intensity = int(mapping.get(emotion, 0))
@@ -101,7 +138,20 @@ def load_rows(input_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                         "run": unit if cohort == "ai" else "", "sourceRow": int(row_index + 1), "identityProvided": bool(participant or run),
                         "color": color, "emotion": emotion, "selected": int(intensity > 0), "intensity": intensity, "valid": valid,
                     })
-        summary[source] = {"file": file_name, "workbookRows": len(frame), "validColorCells": valid_cells, "invalidColorCells": invalid_cells, "parsedProfiles": valid_cells / len(COLORS)}
+        summary[source] = {
+            "file": file_name,
+            "workbookRows": len(frame),
+            "validColorCells": valid_cells,
+            "invalidColorCells": invalid_cells,
+            "recognizedAssociations": recognized_associations,
+            "zeroAssociationCells": zero_association_cells,
+            "parsedProfiles": valid_cells / len(COLORS),
+        }
+        if recognized_associations == 0:
+            raise ValueError(
+                f"{file_name} parsed {valid_cells} color cells but found zero valid GEW associations. "
+                "Stop before analysis to prevent an all-zero source profile."
+            )
     return output, summary
 
 
@@ -137,6 +187,14 @@ def main() -> None:
                {"seed": 20260824, "stability": 500, "permutations": 9999, "bootstrap": 1000, "hungarian": 500})
     print("Loading Task 2 workbooks from", args.input.resolve(), flush=True)
     rows, summary = load_rows(args.input)
+    for source, audit in summary.items():
+        print(
+            f"  {source}: profiles={audit['parsedProfiles']:.0f}, "
+            f"valid cells={audit['validColorCells']}, "
+            f"recognized associations={audit['recognizedAssociations']}, "
+            f"zero-association cells={audit['zeroAssociationCells']}",
+            flush=True,
+        )
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target = PROJECT / "offline_results" / f"task2_heterogeneity_{args.preset}_{stamp}"
     target.mkdir(parents=True, exist_ok=False)
@@ -144,7 +202,7 @@ def main() -> None:
     print(f"Loaded {len(rows):,} long rows. Starting {args.preset} analysis...", flush=True)
     result = run_task2_heterogeneity({"rows": rows, "options": options}, progress=Progress())
     with gzip.open(target / "task2_heterogeneity_result.json.gz", "wt", encoding="utf-8") as handle:
-        json.dump(result, handle, ensure_ascii=False)
+        json.dump(result, handle, ensure_ascii=False, allow_nan=False)
     tables = {
         "subgroup_assignments_human.csv": result["subgroups"]["assignmentsHuman"], "subgroup_assignments_ai.csv": result["subgroups"]["assignmentsAi"],
         "subgroup_validation.csv": result["subgroups"]["validation"], "subgroup_profiles.csv": result["subgroups"]["profiles"],

@@ -2,6 +2,20 @@
 
 这个包包含 Mac 当前 3006 的完整网页，以及不依赖浏览器的实验二正式分析脚本。
 
+## 2026-08-25 Human PCA 修复
+
+本版本修复了旧包的情绪标签大小写问题：Human 工作簿中的 `love`、`compassion` 等小写标签现在会规范为 `Love`、`Compassion`，不会再被静默写成全零 profile。
+
+同时新增输入保护：
+
+- `None` / `Other` 作为合法“未选择”标记处理；
+- 词表之外的未知情绪会显示具体文件、Excel 行号和颜色列并停止；
+- 任一来源若解析到 0 条有效 GEW 关联，会在 PCA/PAM 开始前停止；
+- 终端会逐来源显示 profile 数、有效单元格数、有效关联数和零关联单元格数；
+- `input_summary.json` 会保存上述解析审计字段。
+
+旧版生成的全零 `task2_heterogeneity_result.json.gz` 不能修复，必须用本包和原始八份 Excel 重新运行。
+
 ## 第一次安装
 
 1. 将 ZIP 完整解压到英文短路径，例如 `D:\Chromalab3006Task2`。
@@ -33,6 +47,8 @@ set PIP_PROXY=
 - `gemini.xlsx`
 
 脚本读取第一张工作表。每一行应是一位 Human participant 或一个 AI run，并包含11个 `word_data.D38` 等标准色单元格。单元格内容应为带 `emotion` 与 `intensity` 的 associations JSON。
+
+情绪名不区分大小写；合法强度为0–5。正式分析前请确认终端显示 CN/BW/UK/US 的 `recognized associations` 均明显大于0。
 
 ## 推荐运行顺序
 
@@ -67,7 +83,7 @@ set PIP_PROXY=
 
 主要文件：
 
-- `input_summary.json`：八个输入文件与解析数量；
+- `input_summary.json`：八个输入文件、有效关联数、零关联单元格数与解析数量；
 - `task2_heterogeneity_result.json.gz`：完整结果；
 - `task2_heterogeneity_csv.zip`：论文分析用全部CSV；
 - `quality_control.csv`：完整profile与排除审计；

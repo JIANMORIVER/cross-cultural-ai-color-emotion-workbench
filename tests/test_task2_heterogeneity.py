@@ -4,11 +4,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python_figures"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from task2_heterogeneity import COLORS, EMOTIONS, run_task2_heterogeneity
+from offline_task2_heterogeneity import parse_associations
 
 
 class Task2HeterogeneityTests(unittest.TestCase):
+    def test_offline_parser_normalizes_human_lowercase_labels(self):
+        parsed = parse_associations('[{"emotion":"love","intensity":4},{"emotion":"compassion","intensity":3}]')
+        self.assertEqual(parsed, [
+            {"emotion": "Love", "intensity": 4},
+            {"emotion": "Compassion", "intensity": 3},
+        ])
+
+    def test_offline_parser_accepts_known_zero_selection_sentinels(self):
+        self.assertEqual(parse_associations('[{"emotion":"None","intensity":1}]'), [])
+        self.assertEqual(parse_associations('[{"emotion":"Other","intensity":1}]'), [])
+
+    def test_offline_parser_rejects_unknown_emotion_instead_of_zero_filling(self):
+        with self.assertRaisesRegex(ValueError, "outside the fixed GEW list"):
+            parse_associations('[{"emotion":"Calm","intensity":4}]')
+
+    def test_offline_parser_supports_web_compatible_field_aliases(self):
+        parsed = parse_associations('[{"word":"joy","score":5},{"name":"Fear","value":2}]')
+        self.assertEqual(parsed, [
+            {"emotion": "Joy", "intensity": 5},
+            {"emotion": "Fear", "intensity": 2},
+        ])
+
     def rows(self):
         output = []
         for cohort, sources in (("human", ["CN", "BW", "UK", "US"]), ("ai", ["DeepSeek", "Doubao", "GPT", "Gemini"])):

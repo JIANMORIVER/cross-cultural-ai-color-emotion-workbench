@@ -11,6 +11,8 @@ test("adds browser-side import controls for R9000P gzip result archives", async 
   assert.match(helper, /gunzipSync/);
   assert.match(helper, /validateContinuous/);
   assert.match(helper, /validateSimilarity/);
+  assert.match(helper, /validateHeterogeneity/);
+  assert.match(helper, /normalizeNonFiniteJsonTokens/);
   assert.match(continuous, /导入离线结果 \.json\.gz/);
   assert.match(continuous, /readOfflineAnalysisResult\(file,"continuous"\)/);
   assert.match(similarity, /导入离线结果 \.json\.gz/);
